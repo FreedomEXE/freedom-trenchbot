@@ -1,0 +1,347 @@
+from __future__ import annotations
+
+from typing import Optional, List
+
+import aiosqlite
+
+
+class Database:
+    def __init__(self, path: str):
+        self.path = path
+        self.conn: Optional[aiosqlite.Connection] = None
+
+    @classmethod
+    async def connect(cls, path: str) -> "Database":
+        db = cls(path)
+        db.conn = await aiosqlite.connect(path)
+        db.conn.row_factory = aiosqlite.Row
+        await db.conn.execute("PRAGMA journal_mode=WAL")
+        await db.conn.execute("PRAGMA synchronous=NORMAL")
+        await db.conn.execute("PRAGMA busy_timeout=5000")
+        return db
+
+    async def init(self) -> None:
+        assert self.conn is not None
+        await self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS tokens (
+                token_address TEXT PRIMARY KEY,
+                chain_id TEXT NOT NULL,
+                first_seen INTEGER NOT NULL,
+                last_seen INTEGER NOT NULL,
+                last_checked_at INTEGER,
+                last_alerted_at INTEGER,
+                last_eligible INTEGER,
+                last_eligible_at INTEGER,
+                last_ineligible_at INTEGER,
+                last_seen_metrics TEXT
+            )
+            """
+        )
+        await self._ensure_column("tokens", "last_checked", "INTEGER")
+        await self._ensure_column("tokens", "last_alerted", "INTEGER")
+        await self._ensure_column("tokens", "last_checked_at", "INTEGER")
+        await self._ensure_column("tokens", "last_alerted_at", "INTEGER")
+        await self._ensure_column("tokens", "last_eligible", "INTEGER")
+        await self._ensure_column("tokens", "last_eligible_at", "INTEGER")
+        await self._ensure_column("tokens", "last_ineligible_at", "INTEGER")
+        await self._ensure_column("tokens", "last_seen_metrics", "TEXT")
+        await self._migrate_token_timestamps()
+        await self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS state (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )
+            """
+        )
+        await self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS pair_pool (
+                pair_address TEXT PRIMARY KEY,
+                chain_id TEXT NOT NULL,
+                token_address TEXT NOT NULL,
+                last_seen_at INTEGER NOT NULL,
+                last_checked_at INTEGER,
+                last_hot_score REAL,
+                last_metrics TEXT,
+                source TEXT
+            )
+            """
+        )
+        await self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_tokens_chain_id ON tokens(chain_id)"
+        )
+        await self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_tokens_last_checked ON tokens(last_checked_at)"
+        )
+        await self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_tokens_last_alerted ON tokens(last_alerted_at)"
+        )
+        await self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_tokens_last_eligible ON tokens(last_eligible)"
+        )
+        await self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_pair_pool_last_seen ON pair_pool(last_seen_at)"
+        )
+        await self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_pair_pool_hot_score ON pair_pool(last_hot_score)"
+        )
+        await self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_pair_pool_last_checked ON pair_pool(last_checked_at)"
+        )
+        await self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_pair_pool_token ON pair_pool(token_address)"
+        )
+        await self.conn.commit()
+
+    async def close(self) -> None:
+        if self.conn:
+            await self.conn.close()
+
+    async def get_token(self, token_address: str) -> Optional[aiosqlite.Row]:
+        assert self.conn is not None
+        cur = await self.conn.execute(
+            "SELECT * FROM tokens WHERE token_address = ?",
+            (token_address,),
+        )
+        row = await cur.fetchone()
+        await cur.close()
+        return row
+
+    async def upsert_token_seen(self, token_address: str, chain_id: str, ts: int) -> None:
+        assert self.conn is not None
+        await self.conn.execute(
+            """
+            INSERT INTO tokens (token_address, chain_id, first_seen, last_seen)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(token_address) DO UPDATE SET
+                last_seen = excluded.last_seen
+            """,
+            (token_address, chain_id, ts, ts),
+        )
+        await self.conn.commit()
+
+    async def update_last_checked(self, token_address: str, ts: int) -> None:
+        assert self.conn is not None
+        await self.conn.execute(
+            "UPDATE tokens SET last_checked_at = ? WHERE token_address = ?",
+            (ts, token_address),
+        )
+        await self.conn.commit()
+
+    async def update_last_alerted(self, token_address: str, ts: int) -> None:
+        assert self.conn is not None
+        await self.conn.execute(
+            "UPDATE tokens SET last_alerted_at = ? WHERE token_address = ?",
+            (ts, token_address),
+        )
+        await self.conn.commit()
+
+    async def update_token_state(
+        self,
+        token_address: str,
+        last_checked_at: int,
+        last_eligible: bool,
+        last_eligible_at: Optional[int],
+        last_ineligible_at: Optional[int],
+        last_seen_metrics: Optional[str],
+    ) -> None:
+        assert self.conn is not None
+        await self.conn.execute(
+            """
+            UPDATE tokens
+            SET last_checked_at = ?,
+                last_eligible = ?,
+                last_eligible_at = ?,
+                last_ineligible_at = ?,
+                last_seen_metrics = ?
+            WHERE token_address = ?
+            """,
+            (
+                last_checked_at,
+                1 if last_eligible else 0,
+                last_eligible_at,
+                last_ineligible_at,
+                last_seen_metrics,
+                token_address,
+            ),
+        )
+        await self.conn.commit()
+
+    async def upsert_pair_pool(
+        self,
+        pair_address: str,
+        chain_id: str,
+        token_address: str,
+        last_seen_at: int,
+        last_hot_score: float,
+        last_metrics: Optional[str],
+        source: Optional[str],
+    ) -> None:
+        assert self.conn is not None
+        await self.conn.execute(
+            """
+            INSERT INTO pair_pool (
+                pair_address, chain_id, token_address, last_seen_at, last_hot_score, last_metrics, source
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(pair_address) DO UPDATE SET
+                token_address = excluded.token_address,
+                last_seen_at = excluded.last_seen_at,
+                last_hot_score = excluded.last_hot_score,
+                last_metrics = excluded.last_metrics,
+                source = excluded.source
+            """,
+            (
+                pair_address,
+                chain_id,
+                token_address,
+                last_seen_at,
+                last_hot_score,
+                last_metrics,
+                source,
+            ),
+        )
+        await self.conn.commit()
+
+    async def update_pair_checked(
+        self, pair_address: str, last_checked_at: int, last_hot_score: float, last_metrics: Optional[str]
+    ) -> None:
+        assert self.conn is not None
+        await self.conn.execute(
+            """
+            UPDATE pair_pool
+            SET last_checked_at = ?, last_hot_score = ?, last_metrics = ?
+            WHERE pair_address = ?
+            """,
+            (last_checked_at, last_hot_score, last_metrics, pair_address),
+        )
+        await self.conn.commit()
+
+    async def trim_pair_pool(self, max_size: int) -> None:
+        assert self.conn is not None
+        cur = await self.conn.execute("SELECT COUNT(*) as count FROM pair_pool")
+        row = await cur.fetchone()
+        await cur.close()
+        count = row["count"] if row else 0
+        if count <= max_size:
+            return
+        trim_count = count - max_size
+        await self.conn.execute(
+            """
+            DELETE FROM pair_pool
+            WHERE pair_address IN (
+                SELECT pair_address FROM pair_pool
+                ORDER BY last_seen_at ASC
+                LIMIT ?
+            )
+            """,
+            (trim_count,),
+        )
+        await self.conn.commit()
+
+    async def purge_pair_pool(self, min_seen_at: int) -> None:
+        assert self.conn is not None
+        await self.conn.execute(
+            "DELETE FROM pair_pool WHERE last_seen_at < ?",
+            (min_seen_at,),
+        )
+        await self.conn.commit()
+
+    async def get_hot_pairs(self, limit: int, min_seen_at: int) -> List[aiosqlite.Row]:
+        assert self.conn is not None
+        cur = await self.conn.execute(
+            """
+            SELECT pair_address, chain_id, token_address, last_hot_score, last_metrics
+            FROM pair_pool
+            WHERE last_seen_at >= ?
+            ORDER BY last_hot_score DESC, last_checked_at ASC
+            LIMIT ?
+            """,
+            (min_seen_at, limit),
+        )
+        rows = await cur.fetchall()
+        await cur.close()
+        return rows
+
+    async def count_pair_pool(self) -> int:
+        assert self.conn is not None
+        cur = await self.conn.execute("SELECT COUNT(*) as count FROM pair_pool")
+        row = await cur.fetchone()
+        await cur.close()
+        return row["count"] if row else 0
+
+    async def set_state(self, key: str, value: str) -> None:
+        assert self.conn is not None
+        await self.conn.execute(
+            """
+            INSERT INTO state (key, value)
+            VALUES (?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """,
+            (key, value),
+        )
+        await self.conn.commit()
+
+    async def get_state(self, key: str) -> Optional[str]:
+        assert self.conn is not None
+        cur = await self.conn.execute(
+            "SELECT value FROM state WHERE key = ?",
+            (key,),
+        )
+        row = await cur.fetchone()
+        await cur.close()
+        return row["value"] if row else None
+
+    async def get_state_int(self, key: str, default: int = 0) -> int:
+        value = await self.get_state(key)
+        if value is None:
+            return default
+        try:
+            return int(value)
+        except ValueError:
+            return default
+
+    async def get_state_float(self, key: str, default: float = 0.0) -> float:
+        value = await self.get_state(key)
+        if value is None:
+            return default
+        try:
+            return float(value)
+        except ValueError:
+            return default
+
+    async def _ensure_column(self, table: str, column: str, col_type: str) -> None:
+        assert self.conn is not None
+        cur = await self.conn.execute(f"PRAGMA table_info({table})")
+        rows = await cur.fetchall()
+        await cur.close()
+        columns = {row["name"] for row in rows}
+        if column in columns:
+            return
+        await self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
+
+    async def _migrate_token_timestamps(self) -> None:
+        assert self.conn is not None
+        cur = await self.conn.execute("PRAGMA table_info(tokens)")
+        rows = await cur.fetchall()
+        await cur.close()
+        columns = {row["name"] for row in rows}
+        if "last_checked" in columns and "last_checked_at" in columns:
+            await self.conn.execute(
+                "UPDATE tokens SET last_checked_at = last_checked WHERE last_checked_at IS NULL"
+            )
+        if "last_alerted" in columns and "last_alerted_at" in columns:
+            await self.conn.execute(
+                "UPDATE tokens SET last_alerted_at = last_alerted WHERE last_alerted_at IS NULL"
+            )
+
+    async def get_state_bool(self, key: str, default: bool = False) -> bool:
+        value = await self.get_state(key)
+        if value is None:
+            return default
+        return value.lower() in ("1", "true", "yes", "on")
+
+    async def increment_state_int(self, key: str, amount: int) -> None:
+        current = await self.get_state_int(key, 0)
+        await self.set_state(key, str(current + amount))

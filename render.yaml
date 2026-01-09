@@ -1,0 +1,21 @@
+services:
+  - type: worker
+    name: freedom-trench-bot
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python -m freedom_trench_bot
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: ALLOWED_CHAT_IDS
+        value: ""
+      - key: DB_PATH
+        value: "/var/data/freedom_trench_bot.db"
+      - key: SCAN_INTERVAL_SECONDS
+        value: "20"
+      - key: DEDUP_WINDOW_HOURS
+        value: "24"
+      - key: MIN_INELIGIBLE_MINUTES_TO_REARM
+        value: "30"
+      - key: USE_FDV_AS_MC_PROXY
+        value: "false"
