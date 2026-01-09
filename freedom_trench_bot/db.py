@@ -34,7 +34,11 @@ class Database:
                 last_eligible INTEGER,
                 last_eligible_at INTEGER,
                 last_ineligible_at INTEGER,
-                last_seen_metrics TEXT
+                last_seen_metrics TEXT,
+                eligible_first_at INTEGER,
+                eligible_first_metrics TEXT,
+                last_name TEXT,
+                last_symbol TEXT
             )
             """
         )
@@ -46,6 +50,10 @@ class Database:
         await self._ensure_column("tokens", "last_eligible_at", "INTEGER")
         await self._ensure_column("tokens", "last_ineligible_at", "INTEGER")
         await self._ensure_column("tokens", "last_seen_metrics", "TEXT")
+        await self._ensure_column("tokens", "eligible_first_at", "INTEGER")
+        await self._ensure_column("tokens", "eligible_first_metrics", "TEXT")
+        await self._ensure_column("tokens", "last_name", "TEXT")
+        await self._ensure_column("tokens", "last_symbol", "TEXT")
         await self._migrate_token_timestamps()
         await self.conn.execute(
             """
@@ -80,6 +88,9 @@ class Database:
         )
         await self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_tokens_last_eligible ON tokens(last_eligible)"
+        )
+        await self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_tokens_eligible_first ON tokens(eligible_first_at)"
         )
         await self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_pair_pool_last_seen ON pair_pool(last_seen_at)"
@@ -146,6 +157,10 @@ class Database:
         last_eligible_at: Optional[int],
         last_ineligible_at: Optional[int],
         last_seen_metrics: Optional[str],
+        eligible_first_at: Optional[int],
+        eligible_first_metrics: Optional[str],
+        last_name: Optional[str],
+        last_symbol: Optional[str],
     ) -> None:
         assert self.conn is not None
         await self.conn.execute(
@@ -155,7 +170,11 @@ class Database:
                 last_eligible = ?,
                 last_eligible_at = ?,
                 last_ineligible_at = ?,
-                last_seen_metrics = ?
+                last_seen_metrics = ?,
+                eligible_first_at = ?,
+                eligible_first_metrics = ?,
+                last_name = ?,
+                last_symbol = ?
             WHERE token_address = ?
             """,
             (
@@ -164,6 +183,10 @@ class Database:
                 last_eligible_at,
                 last_ineligible_at,
                 last_seen_metrics,
+                eligible_first_at,
+                eligible_first_metrics,
+                last_name,
+                last_symbol,
                 token_address,
             ),
         )
@@ -270,6 +293,27 @@ class Database:
         row = await cur.fetchone()
         await cur.close()
         return row["count"] if row else 0
+
+    async def get_currently_eligible(
+        self, limit: int, min_first_at: int
+    ) -> List[aiosqlite.Row]:
+        assert self.conn is not None
+        cur = await self.conn.execute(
+            """
+            SELECT token_address, eligible_first_at, eligible_first_metrics,
+                   last_seen_metrics, last_name, last_symbol
+            FROM tokens
+            WHERE last_eligible = 1
+              AND eligible_first_at IS NOT NULL
+              AND eligible_first_at >= ?
+            ORDER BY eligible_first_at DESC
+            LIMIT ?
+            """,
+            (min_first_at, limit),
+        )
+        rows = await cur.fetchall()
+        await cur.close()
+        return rows
 
     async def set_state(self, key: str, value: str) -> None:
         assert self.conn is not None

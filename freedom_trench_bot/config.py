@@ -33,6 +33,8 @@ class Config:
     hot_recheck_top_n: int
     chain_id: str
     display_timezone: str
+    eligible_retention_sec: int
+    eligible_list_limit: int
 
     dex_max_rps: int
     dex_max_concurrency: int
@@ -79,6 +81,8 @@ def load_config() -> Config:
 
     chain_id = "solana"
     display_timezone = os.getenv("DISPLAY_TIMEZONE", "UTC")
+    eligible_retention_sec = int(os.getenv("ELIGIBLE_RETENTION_HOURS", "24")) * 3600
+    eligible_list_limit = int(os.getenv("ELIGIBLE_LIST_LIMIT", "20"))
 
     dex_max_rps = int(os.getenv("DEX_MAX_RPS", "5"))
     dex_max_concurrency = int(os.getenv("DEX_MAX_CONCURRENCY", "2"))
@@ -118,6 +122,8 @@ def load_config() -> Config:
         hot_recheck_top_n=hot_recheck_top_n,
         chain_id=chain_id,
         display_timezone=display_timezone,
+        eligible_retention_sec=eligible_retention_sec,
+        eligible_list_limit=eligible_list_limit,
         dex_max_rps=dex_max_rps,
         dex_max_concurrency=dex_max_concurrency,
         dex_timeout_sec=dex_timeout_sec,

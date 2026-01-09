@@ -9,6 +9,7 @@ def test_filters_pass():
         min_change_6h=1,
         min_change_1h=1,
         min_volume_1h=10000,
+        require_profile=False,
     )
     pair = {
         "marketCap": 90000,
@@ -26,6 +27,7 @@ def test_filters_fdv_proxy_enabled():
         min_change_6h=1,
         min_change_1h=1,
         min_volume_1h=10000,
+        require_profile=False,
     )
     pair = {
         "fdv": 90000,
@@ -44,6 +46,7 @@ def test_filters_fdv_proxy_disabled():
         min_change_6h=1,
         min_change_1h=1,
         min_volume_1h=10000,
+        require_profile=False,
     )
     pair = {
         "fdv": 90000,
@@ -62,6 +65,7 @@ def test_missing_change_24h_fails():
         min_change_6h=1,
         min_change_1h=1,
         min_volume_1h=10000,
+        require_profile=False,
     )
     pair = {
         "marketCap": 90000,
@@ -79,6 +83,7 @@ def test_missing_change_6h_fails():
         min_change_6h=1,
         min_change_1h=1,
         min_volume_1h=10000,
+        require_profile=False,
     )
     pair = {
         "marketCap": 90000,
@@ -96,6 +101,7 @@ def test_missing_change_1h_fails():
         min_change_6h=1,
         min_change_1h=1,
         min_volume_1h=10000,
+        require_profile=False,
     )
     pair = {
         "marketCap": 90000,
@@ -113,6 +119,7 @@ def test_missing_volume_fails():
         min_change_6h=1,
         min_change_1h=1,
         min_volume_1h=10000,
+        require_profile=False,
     )
     pair = {
         "marketCap": 90000,
@@ -129,6 +136,7 @@ def test_negative_changes_fail():
         min_change_6h=1,
         min_change_1h=1,
         min_volume_1h=10000,
+        require_profile=False,
     )
     pair = {
         "marketCap": 90000,
@@ -146,6 +154,7 @@ def test_missing_marketcap_and_fdv_fails():
         min_change_6h=1,
         min_change_1h=1,
         min_volume_1h=10000,
+        require_profile=False,
     )
     pair = {
         "priceChange": {"h1": 1.2, "h6": 1.5, "h24": 2.0},

@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Optional
+import json
+from typing import Any, Dict, Optional
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ChatType, ParseMode
@@ -25,7 +26,7 @@ from .utils import (
 )
 
 WELCOME_HEADER = "+----------------------------+\n| Freedom Trench Bot         |\n| Solana Alerts              |\n+----------------------------+"
-ALERT_HEADER = "+----------------------------+\n| Freedom Trench Bot         |\n| BECAME ELIGIBLE ✅          |\n+----------------------------+"
+ALERT_HEADER = "+----------------------------+\n| Freedom Trench Bot         |\n| BECAME ELIGIBLE ✅         |\n+----------------------------+"
 
 STARTUP_FRAMES = [
     "> initializing...",
@@ -50,6 +51,7 @@ STARTUP_FINAL_FRAME = (
 HELP_TEXT = (
     "/start - onboarding and status\n"
     "/status - monitoring status and filters\n"
+    "/eligible - list currently eligible tokens\n"
     "/filters - current filters\n"
     "/health - health summary (admin only)\n"
     "/pause - pause monitoring (admin only)\n"
@@ -89,6 +91,16 @@ def build_alert_keyboard(pair: dict, token_address: str, chain_id: str) -> Inlin
     return InlineKeyboardMarkup(buttons)
 
 
+def build_status_keyboard() -> InlineKeyboardMarkup:
+    buttons = [
+        [
+            InlineKeyboardButton("Currently Eligible", callback_data="eligible:list"),
+            InlineKeyboardButton("Settings", callback_data="settings"),
+        ]
+    ]
+    return InlineKeyboardMarkup(buttons)
+
+
 def build_trigger_reason(filters) -> str:
     return (
         f"Trigger: MC<= {format_usd(filters.max_market_cap)}, "
@@ -96,6 +108,69 @@ def build_trigger_reason(filters) -> str:
         f"Change1h/6h/24h>= {filters.min_change_1h:.2f}%/"
         f"{filters.min_change_6h:.2f}%/{filters.min_change_24h:.2f}%"
     )
+
+
+def _parse_metrics_snapshot(raw: Optional[str]) -> Dict[str, Any]:
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _to_float(value: Any) -> Optional[float]:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _format_mcap_from_snapshot(snapshot: Dict[str, Any]) -> str:
+    value = _to_float(snapshot.get("marketCap"))
+    label = snapshot.get("marketCapLabel") or "Market Cap"
+    suffix = ""
+    if label != "Market Cap":
+        suffix = f" ({escape_html(str(label))})"
+    return f"{format_usd(value)}{suffix}"
+
+
+def format_eligible_list(rows, tz_name: str, retention_sec: int) -> str:
+    hours = max(1, int(retention_sec / 3600))
+    header = f"<pre>{WELCOME_HEADER}</pre>"
+    if not rows:
+        return f"{header}\nCurrently eligible (last {hours}h): 0\nNo tokens currently eligible."
+
+    lines = [header, f"Currently eligible (last {hours}h): {len(rows)}"]
+    for idx, row in enumerate(rows, start=1):
+        token_address = row["token_address"]
+        name = escape_html(row["last_name"] or "Unknown")
+        symbol = escape_html(row["last_symbol"] or "?")
+        found_ts = row["eligible_first_at"]
+        found_snapshot = _parse_metrics_snapshot(row["eligible_first_metrics"])
+        current_snapshot = _parse_metrics_snapshot(row["last_seen_metrics"])
+        if not current_snapshot:
+            current_snapshot = found_snapshot
+
+        lines.append(f"{idx}. {name} ({symbol})")
+        lines.append(f"CA: <code>{escape_html(token_address)}</code>")
+        lines.append(f"Found: {format_ts(found_ts, tz_name)}")
+        lines.append(f"MCap now: {_format_mcap_from_snapshot(current_snapshot)}")
+        lines.append(f"MCap found: {_format_mcap_from_snapshot(found_snapshot)}")
+        lines.append("")
+    return "\n".join(lines).strip()
+
+
+async def send_eligible_list_message(message, ctx: AppContext) -> None:
+    if message is None:
+        return
+    now = utc_now_ts()
+    rows = await ctx.db.get_currently_eligible(
+        ctx.config.eligible_list_limit, now - ctx.config.eligible_retention_sec
+    )
+    text = format_eligible_list(rows, ctx.config.display_timezone, ctx.config.eligible_retention_sec)
+    await message.reply_text(text, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
 
 
 async def send_startup_animation(
@@ -209,7 +284,6 @@ def format_filters(ctx: AppContext) -> str:
         f"Change 6h min: {filters.min_change_6h:.2f}%",
         f"Change 1h min: {filters.min_change_1h:.2f}%",
         f"Volume 1h min: {format_usd(filters.min_volume_1h)}",
-        f"Re-arm min ineligible: {format_duration(ctx.config.min_ineligible_duration_sec)}",
     ]
     return "\n".join(lines)
 
@@ -294,21 +368,31 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     status_lines = [
         "STATUS",
         "• Chain: Solana",
-        "• Mode: Eligibility Transitions",
+        "• Mode: Eligible List",
         f"• Scan Interval: {ctx.config.scan_interval_sec}s",
         "• Alerts: ENABLED",
     ]
     status_text = "\n".join(status_lines)
 
     if update.effective_message:
-        await update.effective_message.reply_text(status_text)
+        await update.effective_message.reply_text(
+            status_text, reply_markup=build_status_keyboard()
+        )
     elif update.effective_chat:
-        await context.bot.send_message(chat_id=update.effective_chat.id, text=status_text)
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=status_text,
+            reply_markup=build_status_keyboard(),
+        )
 
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     lines = [f"<pre>{WELCOME_HEADER}</pre>", HELP_TEXT]
-    await update.effective_message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+    await update.effective_message.reply_text(
+        "\n".join(lines),
+        parse_mode=ParseMode.HTML,
+        reply_markup=build_status_keyboard(),
+    )
 
 
 async def cmd_filters(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -357,7 +441,19 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         median_lag_sec,
     )
     lines = [f"<pre>{WELCOME_HEADER}</pre>", status]
-    await update.effective_message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+    await update.effective_message.reply_text(
+        "\n".join(lines),
+        parse_mode=ParseMode.HTML,
+        reply_markup=build_status_keyboard(),
+    )
+
+
+async def cmd_eligible(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    ctx = get_app_ctx(context)
+    if ctx is None:
+        await update.effective_message.reply_text("Bot is starting, try again in a moment.")
+        return
+    await send_eligible_list_message(update.effective_message, ctx)
 
 
 async def cmd_health(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -486,6 +582,10 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         )
         return
 
+    if data == "eligible:list":
+        await send_eligible_list_message(query.message, ctx)
+        return
+
     if data == "settings":
         await query.message.reply_text(
             f"<pre>{WELCOME_HEADER}</pre>\n{format_filters(ctx)}",
@@ -504,6 +604,7 @@ def register_handlers(application: Application) -> None:
     application.add_handler(CommandHandler("start", cmd_start))
     application.add_handler(CommandHandler("help", cmd_help))
     application.add_handler(CommandHandler("status", cmd_status))
+    application.add_handler(CommandHandler("eligible", cmd_eligible))
     application.add_handler(CommandHandler("filters", cmd_filters))
     application.add_handler(CommandHandler("health", cmd_health))
     application.add_handler(CommandHandler("pause", cmd_pause))
@@ -515,3 +616,9 @@ def register_handlers(application: Application) -> None:
     application.add_handler(ChatMemberHandler(on_my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER))
 
     application.add_error_handler(on_error)
+
+
+
+
+
+

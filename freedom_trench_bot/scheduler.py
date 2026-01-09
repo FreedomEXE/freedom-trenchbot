@@ -2,12 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from telegram.constants import ParseMode
 
 from .bot import build_alert_keyboard, format_alert_message, build_trigger_reason
-from .eligibility import EligibilityDecision, EligibilityState, evaluate_transition
 from .filters import evaluate_pair, extract_metrics
 from .metrics import add_lag_sample, increment_counter, increment_daily_counter, update_rate_counter
 from .types import AppContext, PairCandidate
@@ -62,6 +61,24 @@ def _metrics_snapshot(pair: Dict[str, Any], metrics) -> str:
         "change24h": metrics.change_24h,
     }
     return json.dumps(data, ensure_ascii=True)
+
+
+def _extract_token_meta(pair: Dict[str, Any], token_address: str) -> Tuple[str, str]:
+    base = pair.get("baseToken") if isinstance(pair, dict) else None
+    quote = pair.get("quoteToken") if isinstance(pair, dict) else None
+    token_address_lc = token_address.lower()
+    token_obj = base if isinstance(base, dict) else {}
+    if isinstance(base, dict) and base.get("address") and base["address"].lower() == token_address_lc:
+        token_obj = base
+    elif (
+        isinstance(quote, dict)
+        and quote.get("address")
+        and quote["address"].lower() == token_address_lc
+    ):
+        token_obj = quote
+    name = token_obj.get("name") or "Unknown"
+    symbol = token_obj.get("symbol") or "?"
+    return str(name), str(symbol)
 
 
 class Scanner:
@@ -158,72 +175,101 @@ class Scanner:
         await update_rate_counter(db, "pairs_fetched", hot_fetch_count, now)
         await increment_counter(db, "scanned_pairs", len(candidates))
 
-        token_best = self._select_best_pairs(candidates)
-        await increment_counter(db, "unique_tokens_checked", len(token_best))
+        token_groups = self._group_pairs_by_token(candidates)
+        await increment_counter(db, "unique_tokens_checked", len(token_groups))
 
-        for candidate in token_best.values():
-            token_address = candidate.token_address
+        for token_address, token_candidates in token_groups.items():
             await db.upsert_token_seen(token_address, config.chain_id, now)
             token_row = await db.get_token(token_address)
             if token_row is None:
                 continue
 
-            result = evaluate_pair(candidate.pair, config.filters, config.use_fdv_as_mc_proxy)
-            if not result.passed:
+            best_candidate: Optional[PairCandidate] = None
+            best_result = None
+            best_pass_candidate: Optional[PairCandidate] = None
+            best_pass_result = None
+            for candidate in token_candidates:
+                result = evaluate_pair(candidate.pair, config.filters, config.use_fdv_as_mc_proxy)
+                if best_candidate is None or candidate.hot_score > best_candidate.hot_score:
+                    best_candidate = candidate
+                    best_result = result
+                if result.passed and (
+                    best_pass_candidate is None or candidate.hot_score > best_pass_candidate.hot_score
+                ):
+                    best_pass_candidate = candidate
+                    best_pass_result = result
+
+            if best_candidate is None or best_result is None:
+                continue
+
+            if best_pass_candidate is not None and best_pass_result is not None:
+                primary_candidate = best_pass_candidate
+                primary_result = best_pass_result
+                eligible = True
+            else:
+                primary_candidate = best_candidate
+                primary_result = best_result
+                eligible = False
                 logger.info(
                     "filter_reject",
                     extra={
                         "token": token_address,
-                        "pair": candidate.pair_address,
-                        "reasons": result.reasons,
-                        "metrics": result.metrics.__dict__,
+                        "pair": primary_candidate.pair_address,
+                        "reasons": primary_result.reasons,
+                        "metrics": primary_result.metrics.__dict__,
                     },
                 )
 
-            prev_last_eligible = token_row["last_eligible"]
-            prev_last_eligible_at = token_row["last_eligible_at"]
-            decision = self._evaluate_transition(now, token_row, result.passed, config)
-            transitioned_to_eligible = not bool(prev_last_eligible) and decision.last_eligible
-            last_eligible_at = prev_last_eligible_at
-            if transitioned_to_eligible:
+            name, symbol = _extract_token_meta(primary_candidate.pair, token_address)
+            last_seen_metrics = _metrics_snapshot(primary_candidate.pair, primary_result.metrics)
+
+            eligible_first_at = token_row["eligible_first_at"]
+            eligible_first_metrics = token_row["eligible_first_metrics"]
+            newly_eligible = False
+            if eligible and not eligible_first_at:
+                eligible_first_at = now
+                eligible_first_metrics = last_seen_metrics
+                newly_eligible = True
+
+            last_eligible_at = token_row["last_eligible_at"]
+            last_ineligible_at = token_row["last_ineligible_at"]
+            if eligible:
                 last_eligible_at = now
-            elif decision.last_eligible and last_eligible_at is None:
-                last_eligible_at = now
+            else:
+                last_ineligible_at = now
 
             await db.update_token_state(
                 token_address=token_address,
                 last_checked_at=now,
-                last_eligible=decision.last_eligible,
+                last_eligible=eligible,
                 last_eligible_at=last_eligible_at,
-                last_ineligible_at=decision.last_ineligible_at,
-                last_seen_metrics=_metrics_snapshot(candidate.pair, result.metrics),
+                last_ineligible_at=last_ineligible_at,
+                last_seen_metrics=last_seen_metrics,
+                eligible_first_at=eligible_first_at,
+                eligible_first_metrics=eligible_first_metrics,
+                last_name=name,
+                last_symbol=symbol,
             )
             await db.update_pair_checked(
-                candidate.pair_address,
+                primary_candidate.pair_address,
                 now,
-                candidate.hot_score,
-                _metrics_snapshot(candidate.pair, result.metrics),
+                primary_candidate.hot_score,
+                last_seen_metrics,
             )
 
-            if result.passed:
+            if newly_eligible:
                 await increment_counter(db, "eligible_count", 1)
                 await increment_daily_counter(db, "matches", 1, now)
-
-            if not result.passed:
-                continue
-
-            if transitioned_to_eligible:
                 logger.info(
-                    "eligibility_transition",
+                    "eligible_discovered",
                     extra={
                         "token": token_address,
-                        "pair": candidate.pair_address,
-                        "metrics": result.metrics.__dict__,
-                        "trigger": decision.reason,
+                        "pair": primary_candidate.pair_address,
+                        "metrics": primary_result.metrics.__dict__,
                     },
                 )
 
-            if not decision.should_alert:
+            if not eligible:
                 continue
 
             if muted:
@@ -234,12 +280,16 @@ class Scanner:
                 logger.warning("allowlist_empty_skip_post")
                 continue
 
-            first_seen_ts = self._first_seen_ts(candidate.pair, token_row)
+            already_alerted = token_row["last_alerted_at"]
+            if already_alerted:
+                continue
+
+            first_seen_ts = self._first_seen_ts(primary_candidate.pair, token_row)
             trigger_reason = build_trigger_reason(config.filters)
             text = format_alert_message(
-                candidate.pair,
+                primary_candidate.pair,
                 token_address,
-                result.metrics,
+                primary_result.metrics,
                 first_seen_ts,
                 config.display_timezone,
                 config.chain_id,
@@ -253,7 +303,7 @@ class Scanner:
                 await add_lag_sample(db, now - first_seen_ts, config.metrics_sample_size)
                 continue
 
-            posted = await self._post_alert(text, candidate.pair, token_address)
+            posted = await self._post_alert(text, primary_candidate.pair, token_address)
             if posted:
                 await db.update_last_alerted(token_address, now)
                 await increment_counter(db, "alerted_count", 1)
@@ -269,30 +319,12 @@ class Scanner:
                 break
         return list(dedup.values())
 
-    def _select_best_pairs(self, candidates: List[PairCandidate]) -> Dict[str, PairCandidate]:
-        best: Dict[str, PairCandidate] = {}
+    def _group_pairs_by_token(self, candidates: List[PairCandidate]) -> Dict[str, List[PairCandidate]]:
+        grouped: Dict[str, List[PairCandidate]] = {}
         for candidate in candidates:
             key = candidate.token_address.lower()
-            current = best.get(key)
-            if current is None or candidate.hot_score > current.hot_score:
-                best[key] = candidate
-        return best
-
-    def _evaluate_transition(
-        self, now: int, token_row, eligible: bool, config
-    ) -> EligibilityDecision:
-        state = EligibilityState(
-            last_eligible=token_row["last_eligible"],
-            last_alerted_at=token_row["last_alerted_at"],
-            last_ineligible_at=token_row["last_ineligible_at"],
-        )
-        return evaluate_transition(
-            now,
-            eligible,
-            state,
-            config.dedup_window_sec,
-            config.min_ineligible_duration_sec,
-        )
+            grouped.setdefault(key, []).append(candidate)
+        return grouped
 
     def _first_seen_ts(self, pair: Dict[str, Any], token_row) -> int:
         pair_created_at = _coerce_ts(pair.get("pairCreatedAt"))
