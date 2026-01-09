@@ -35,6 +35,7 @@ Set `MARKET_BASE_TOKENS` to add additional base tokens to sample.
    - `BOT_TOKEN`
    - `ALLOWED_CHAT_IDS` (comma separated, use the group chat id)
    - `ADMIN_USER_IDS` (optional override)
+   - `ALLOWED_THREAD_IDS` (optional, restrict alerts to specific topics/threads)
 5) Install dependencies:
    - `pip install -r requirements.txt`
    - For tests: `pip install -r requirements-dev.txt`
@@ -56,6 +57,7 @@ Set `DRY_RUN=true` to log would-alert tokens without posting to Telegram.
 - `DB_PATH` (defaults to `./data/freedom_trench_bot.db`)
 - `DISCOVERY_MODE` (`hybrid`, `market_sampler`, or `fallback_search`)
 - `SEARCH_QUERIES`, `HYBRID_SEARCH_REFRESH_SECONDS`, `HYBRID_REFRESH_SECONDS`, `HYBRID_MAX_TOKENS`
+- `ALLOWED_THREAD_IDS` (restrict alerts to specific thread IDs in a group)
 
 ## Commands
 - `/start` - onboarding and status

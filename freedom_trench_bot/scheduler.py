@@ -336,18 +336,26 @@ class Scanner:
         keyboard = build_alert_keyboard(pair, token_address, config.chain_id)
         posted_any = False
         for chat_id in config.allowed_chat_ids:
-            try:
-                await self.bot.send_message(
-                    chat_id=chat_id,
-                    text=text,
-                    parse_mode=ParseMode.HTML,
-                    disable_web_page_preview=True,
-                    reply_markup=keyboard,
-                )
-                posted_any = True
-            except Exception:
-                self.ctx.logger.exception(
-                    "alert_send_failed",
-                    extra={"chat_id": chat_id, "token": token_address},
-                )
+            thread_ids = [None]
+            if config.allowed_thread_ids and chat_id < 0:
+                thread_ids = list(config.allowed_thread_ids)
+            for thread_id in thread_ids:
+                try:
+                    kwargs = {}
+                    if thread_id is not None:
+                        kwargs["message_thread_id"] = thread_id
+                    await self.bot.send_message(
+                        chat_id=chat_id,
+                        text=text,
+                        parse_mode=ParseMode.HTML,
+                        disable_web_page_preview=True,
+                        reply_markup=keyboard,
+                        **kwargs,
+                    )
+                    posted_any = True
+                except Exception:
+                    self.ctx.logger.exception(
+                        "alert_send_failed",
+                        extra={"chat_id": chat_id, "thread_id": thread_id, "token": token_address},
+                    )
         return posted_any

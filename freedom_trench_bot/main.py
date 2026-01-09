@@ -60,6 +60,7 @@ def main() -> None:
                 "scan_interval_sec": config.scan_interval_sec,
                 "discovery_mode": config.discovery_mode,
                 "allowed_chats": len(config.allowed_chat_ids),
+                "allowed_threads": len(config.allowed_thread_ids),
                 "db_path": config.sqlite_path,
                 "dry_run": config.dry_run,
             },

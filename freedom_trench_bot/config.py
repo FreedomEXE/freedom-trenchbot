@@ -21,6 +21,7 @@ class FilterConfig:
 class Config:
     bot_token: str
     allowed_chat_ids: Set[int]
+    allowed_thread_ids: Set[int]
     admin_user_ids: Set[int]
     sqlite_path: str
     log_level: str
@@ -62,6 +63,7 @@ def load_config() -> Config:
 
     allowed_chat_ids = parse_csv_ints(os.getenv("ALLOWED_CHAT_IDS", ""))
     admin_user_ids = parse_csv_ints(os.getenv("ADMIN_USER_IDS", ""))
+    allowed_thread_ids = parse_csv_ints(os.getenv("ALLOWED_THREAD_IDS", ""))
 
     db_path = os.getenv("DB_PATH", "").strip()
     if not db_path:
@@ -116,6 +118,7 @@ def load_config() -> Config:
     return Config(
         bot_token=bot_token,
         allowed_chat_ids=allowed_chat_ids,
+        allowed_thread_ids=allowed_thread_ids,
         admin_user_ids=admin_user_ids,
         sqlite_path=db_path,
         log_level=log_level,
