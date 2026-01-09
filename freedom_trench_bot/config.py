@@ -46,6 +46,9 @@ class Config:
     discovery_mode: str
     market_base_tokens: List[str]
     search_queries: List[str]
+    hybrid_search_refresh_sec: int
+    hybrid_refresh_sec: int
+    hybrid_max_tokens: int
 
     use_fdv_as_mc_proxy: bool
     metrics_sample_size: int
@@ -91,9 +94,12 @@ def load_config() -> Config:
     dex_retry_base_delay_sec = float(os.getenv("DEX_RETRY_BASE_DELAY_SEC", "0.5"))
     dex_cache_ttl_sec = int(os.getenv("DEX_CACHE_TTL_SEC", "15"))
 
-    discovery_mode = os.getenv("DISCOVERY_MODE", "market_sampler").strip().lower()
+    discovery_mode = os.getenv("DISCOVERY_MODE", "hybrid").strip().lower()
     market_base_tokens = parse_csv_strs(os.getenv("MARKET_BASE_TOKENS", ""))
     search_queries = parse_csv_strs(os.getenv("SEARCH_QUERIES", ""))
+    hybrid_search_refresh_sec = int(os.getenv("HYBRID_SEARCH_REFRESH_SECONDS", "30"))
+    hybrid_refresh_sec = int(os.getenv("HYBRID_REFRESH_SECONDS", "60"))
+    hybrid_max_tokens = int(os.getenv("HYBRID_MAX_TOKENS", "50"))
 
     use_fdv_as_mc_proxy = parse_bool(os.getenv("USE_FDV_AS_MC_PROXY", "false"), False)
     metrics_sample_size = int(os.getenv("METRICS_SAMPLE_SIZE", "200"))
@@ -133,6 +139,9 @@ def load_config() -> Config:
         discovery_mode=discovery_mode,
         market_base_tokens=market_base_tokens,
         search_queries=search_queries,
+        hybrid_search_refresh_sec=hybrid_search_refresh_sec,
+        hybrid_refresh_sec=hybrid_refresh_sec,
+        hybrid_max_tokens=hybrid_max_tokens,
         use_fdv_as_mc_proxy=use_fdv_as_mc_proxy,
         metrics_sample_size=metrics_sample_size,
         filters=filters,

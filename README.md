@@ -1,29 +1,31 @@
 # Freedom Trench Bot
 
-Freedom Trench Bot monitors Solana markets via the Dexscreener API and posts alerts to allowlisted Telegram group chats when tokens transition from ineligible to eligible. It does not trade or manage wallets.
+Freedom Trench Bot monitors Solana markets via the Dexscreener API and posts alerts to allowlisted Telegram group chats when tokens become eligible. It also keeps a 24h "currently eligible" list for quick review. It does not trade or manage wallets.
 
 ## Architecture (brief)
 - Telegram bot (python-telegram-bot) handles commands, admin checks, and alert delivery.
 - Dexscreener client uses rate limiting, retries, and caching for API calls.
 - Market sampler polls Solana pair data and maintains a rolling candidate pool; hot pairs are rechecked more frequently.
-- Eligibility transition engine alerts only when a token moves from ineligible to eligible.
-- SQLite stores seen tokens, eligibility state, candidate pool, last checked time, last alert, and bot state (pause, mute, counters).
+- Eligibility evaluation computes per-scan eligibility and alerts only once when a token is first discovered eligible.
+- SQLite stores seen tokens, eligibility state, candidate pool, eligible-first metrics, last checked time, last alert, and bot state (pause, mute, counters).
 
 ## Discovery strategy
-Discovery runs in market sampling mode (`DISCOVERY_MODE=market_sampler`):
-- Each scan pulls a broad set of Solana pairs via `token-pairs` on base tokens (e.g., WSOL/USDC). The endpoint returns a full list per base token (no paging), so repeated polling keeps recall high for those bases.
+Discovery runs in hybrid mode (`DISCOVERY_MODE=hybrid`) for best recall:
+- Market sampler pulls Solana pairs via `token-pairs` on base tokens (WSOL/USDC/USDT/USD1 by default, plus any `MARKET_BASE_TOKENS` you add).
+- Search queries add additional coverage for non-base pairs and fast-moving trends.
+- Token profiles/boosts add newly profiled tokens that may not appear in the base sampler yet.
 - Pairs are added to a rolling pool (default retention: 6 hours) and scored by liquidity + volume.
 - The hottest pairs are rechecked every scan to catch spikes from older tokens.
-- The pool is refreshed every scan from the broader sampler to avoid blind spots; use `MARKET_BASE_TOKENS` to widen coverage beyond WSOL/USDC.
-- Fallback mode (`fallback_search`) exists for resiliency, but the primary path is market-wide sampling.
 
 ### Endpoints used
-- `GET https://api.dexscreener.com/token-pairs/v1/solana/{tokenAddress}` (market sampler + metrics)
+- `GET https://api.dexscreener.com/token-pairs/v1/solana/{tokenAddress}` (market sampler + token lookups)
 - `GET https://api.dexscreener.com/latest/dex/pairs/{chainId}/{pairId}` (hot recheck)
-- `GET https://api.dexscreener.com/latest/dex/search?q=...` (fallback mode only)
+- `GET https://api.dexscreener.com/latest/dex/search?q=...` (hybrid search)
+- `GET https://api.dexscreener.com/token-profiles/latest/v1` (hybrid profiles)
+- `GET https://api.dexscreener.com/token-boosts/latest/v1` (hybrid boosts)
 
 This avoids HTML scraping and stays within rate limits. Tune pool size, hot recheck count, and scan interval in `.env`.
-Set `MARKET_BASE_TOKENS` to override the default WSOL/USDC sampler list.
+Set `MARKET_BASE_TOKENS` to add additional base tokens to sample.
 
 ## Setup
 1) Use Python 3.12.x (see `.python-version`).
@@ -49,14 +51,16 @@ Set `DRY_RUN=true` to log would-alert tokens without posting to Telegram.
 ### Key config knobs
 - `SCAN_INTERVAL_SECONDS` (default 20)
 - `CANDIDATE_POOL_MAX` and `HOT_RECHECK_TOP_N` (pool size + hot rechecks)
-- `MIN_INELIGIBLE_MINUTES_TO_REARM` and `DEDUPE_WINDOW_HOURS` (anti-spam rearm rules)
 - `USE_FDV_AS_MC_PROXY` (market cap fallback)
 - `FILTER_REQUIRE_PROFILE` (require profile metadata in Dexscreener `info`)
 - `DB_PATH` (defaults to `./data/freedom_trench_bot.db`)
+- `DISCOVERY_MODE` (`hybrid`, `market_sampler`, or `fallback_search`)
+- `SEARCH_QUERIES`, `HYBRID_SEARCH_REFRESH_SECONDS`, `HYBRID_REFRESH_SECONDS`, `HYBRID_MAX_TOKENS`
 
 ## Commands
 - `/start` - onboarding and status
 - `/status` - monitoring status, last scan, counters, filters
+- `/eligible` - list currently eligible tokens
 - `/filters` - current filters
 - `/health` - health summary (admin only)
 - `/pause` - pause monitoring (admin only)
@@ -65,13 +69,13 @@ Set `DRY_RUN=true` to log would-alert tokens without posting to Telegram.
 - `/help` - quick help
 
 ## Alert format
-Alerts fire only when a token transitions from ineligible to eligible. The message includes token name/symbol, chain, CA, market cap (or FDV proxy), volume 1h, 1h/6h/24h changes, trigger reason, first seen, and links.
+Alerts fire only once when a token is first discovered eligible. The message includes token name/symbol, chain, CA, market cap (or FDV proxy), volume 1h, 1h/6h/24h changes, trigger reason, first seen, and links.
 
 ## Brand kit
 SVG logo: `assets/freedom-trench-bot.svg`
 
 ## Notes
 - If `marketCap` is missing, FDV is only used when `USE_FDV_AS_MC_PROXY=true` and is labeled as a proxy.
-- Alerts only fire on eligibility transitions and require the token to be ineligible for at least `MIN_INELIGIBLE_MINUTES_TO_REARM` before re-alerting.
+- Alerts only fire once per token; check `/eligible` to see the currently eligible list.
 - Missing change or volume fields fail the filter by design.
 - No trading, wallet creation, or automation is included.
