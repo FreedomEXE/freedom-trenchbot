@@ -38,7 +38,10 @@ class Database:
                 eligible_first_at INTEGER,
                 eligible_first_metrics TEXT,
                 last_name TEXT,
-                last_symbol TEXT
+                last_symbol TEXT,
+                called_price_usd REAL,
+                max_price_usd REAL,
+                max_market_cap REAL
             )
             """
         )
@@ -54,6 +57,9 @@ class Database:
         await self._ensure_column("tokens", "eligible_first_metrics", "TEXT")
         await self._ensure_column("tokens", "last_name", "TEXT")
         await self._ensure_column("tokens", "last_symbol", "TEXT")
+        await self._ensure_column("tokens", "called_price_usd", "REAL")
+        await self._ensure_column("tokens", "max_price_usd", "REAL")
+        await self._ensure_column("tokens", "max_market_cap", "REAL")
         await self._migrate_token_timestamps()
         await self.conn.execute(
             """
@@ -91,6 +97,9 @@ class Database:
         )
         await self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_tokens_eligible_first ON tokens(eligible_first_at)"
+        )
+        await self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_tokens_called_price ON tokens(called_price_usd)"
         )
         await self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_pair_pool_last_seen ON pair_pool(last_seen_at)"
@@ -161,6 +170,9 @@ class Database:
         eligible_first_metrics: Optional[str],
         last_name: Optional[str],
         last_symbol: Optional[str],
+        called_price_usd: Optional[float],
+        max_price_usd: Optional[float],
+        max_market_cap: Optional[float],
     ) -> None:
         assert self.conn is not None
         await self.conn.execute(
@@ -174,7 +186,10 @@ class Database:
                 eligible_first_at = ?,
                 eligible_first_metrics = ?,
                 last_name = ?,
-                last_symbol = ?
+                last_symbol = ?,
+                called_price_usd = ?,
+                max_price_usd = ?,
+                max_market_cap = ?
             WHERE token_address = ?
             """,
             (
@@ -187,6 +202,9 @@ class Database:
                 eligible_first_metrics,
                 last_name,
                 last_symbol,
+                called_price_usd,
+                max_price_usd,
+                max_market_cap,
                 token_address,
             ),
         )
@@ -305,6 +323,25 @@ class Database:
             FROM tokens
             WHERE last_eligible = 1
               AND eligible_first_at IS NOT NULL
+              AND eligible_first_at >= ?
+            ORDER BY eligible_first_at DESC
+            LIMIT ?
+            """,
+            (min_first_at, limit),
+        )
+        rows = await cur.fetchall()
+        await cur.close()
+        return rows
+
+    async def get_called_since(self, limit: int, min_first_at: int) -> List[aiosqlite.Row]:
+        assert self.conn is not None
+        cur = await self.conn.execute(
+            """
+            SELECT token_address, eligible_first_at, eligible_first_metrics,
+                   last_seen_metrics, last_name, last_symbol,
+                   called_price_usd, max_price_usd, max_market_cap
+            FROM tokens
+            WHERE eligible_first_at IS NOT NULL
               AND eligible_first_at >= ?
             ORDER BY eligible_first_at DESC
             LIMIT ?

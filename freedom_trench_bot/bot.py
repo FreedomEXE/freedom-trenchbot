@@ -52,6 +52,7 @@ HELP_TEXT = (
     "/start - onboarding and status\n"
     "/status - monitoring status and filters\n"
     "/eligible - list currently eligible tokens\n"
+    "/stats - list tokens called in the last 24h\n"
     "/filters - current filters\n"
     "/health - health summary (admin only)\n"
     "/pause - pause monitoring (admin only)\n"
@@ -162,6 +163,50 @@ def format_eligible_list(rows, tz_name: str, retention_sec: int) -> str:
     return "\n".join(lines).strip()
 
 
+def _format_price(value: Optional[float]) -> str:
+    if value is None:
+        return "n/a"
+    return f"${value:,.8f}".rstrip("0").rstrip(".")
+
+
+def format_called_stats(rows, tz_name: str, retention_sec: int, limit: int) -> str:
+    hours = max(1, int(retention_sec / 3600))
+    header = f"<pre>{WELCOME_HEADER}</pre>"
+    if not rows:
+        return f"{header}\nCalled last {hours}h: 0\nNo calls in the last {hours}h."
+
+    lines = [header, f"Called last {hours}h: {len(rows)} (showing up to {limit})"]
+    for idx, row in enumerate(rows, start=1):
+        token_address = row["token_address"]
+        name = escape_html(row["last_name"] or "Unknown")
+        symbol = escape_html(row["last_symbol"] or "?")
+        called_ts = row["eligible_first_at"]
+        found_snapshot = _parse_metrics_snapshot(row["eligible_first_metrics"])
+        current_snapshot = _parse_metrics_snapshot(row["last_seen_metrics"])
+        if not current_snapshot:
+            current_snapshot = found_snapshot
+
+        called_price = row["called_price_usd"]
+        max_price = row["max_price_usd"]
+        roi = None
+        if called_price and max_price and called_price > 0:
+            roi = ((max_price / called_price) - 1.0) * 100.0
+
+        ath_mcap = row["max_market_cap"]
+        if ath_mcap is None:
+            ath_mcap = _to_float(found_snapshot.get("marketCap"))
+
+        lines.append(f"{idx}. {name} ({symbol})")
+        lines.append(f"CA: <code>{escape_html(token_address)}</code>")
+        lines.append(f"Called: {format_ts(called_ts, tz_name)}")
+        lines.append(f"MCap called: {_format_mcap_from_snapshot(found_snapshot)}")
+        lines.append(f"MCap now: {_format_mcap_from_snapshot(current_snapshot)}")
+        lines.append(f"ATH MCap (since call): {format_usd(ath_mcap)}")
+        lines.append(f"Max ROI (since call): {format_pct(roi)}")
+        lines.append("")
+    return "\n".join(lines).strip()
+
+
 async def send_eligible_list_message(message, ctx: AppContext) -> None:
     if message is None:
         return
@@ -170,6 +215,22 @@ async def send_eligible_list_message(message, ctx: AppContext) -> None:
         ctx.config.eligible_list_limit, now - ctx.config.eligible_retention_sec
     )
     text = format_eligible_list(rows, ctx.config.display_timezone, ctx.config.eligible_retention_sec)
+    await message.reply_text(text, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+
+
+async def send_called_stats_message(message, ctx: AppContext) -> None:
+    if message is None:
+        return
+    now = utc_now_ts()
+    rows = await ctx.db.get_called_since(
+        ctx.config.called_list_limit, now - ctx.config.eligible_retention_sec
+    )
+    text = format_called_stats(
+        rows,
+        ctx.config.display_timezone,
+        ctx.config.eligible_retention_sec,
+        ctx.config.called_list_limit,
+    )
     await message.reply_text(text, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
 
 
@@ -233,6 +294,7 @@ def format_alert_message(
     tz_name: str,
     chain_id: str,
     trigger_reason: str,
+    tagline: str,
 ) -> str:
     base = pair.get("baseToken") or {}
     quote = pair.get("quoteToken") or {}
@@ -258,6 +320,7 @@ def format_alert_message(
 
     lines = [
         header_block,
+        escape_html(tagline),
         f"Token: {name} ({symbol})",
         "Chain: Solana",
         "CA:",
@@ -456,6 +519,14 @@ async def cmd_eligible(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await send_eligible_list_message(update.effective_message, ctx)
 
 
+async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    ctx = get_app_ctx(context)
+    if ctx is None:
+        await update.effective_message.reply_text("Bot is starting, try again in a moment.")
+        return
+    await send_called_stats_message(update.effective_message, ctx)
+
+
 async def cmd_health(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     ctx = get_app_ctx(context)
     if ctx is None:
@@ -605,6 +676,7 @@ def register_handlers(application: Application) -> None:
     application.add_handler(CommandHandler("help", cmd_help))
     application.add_handler(CommandHandler("status", cmd_status))
     application.add_handler(CommandHandler("eligible", cmd_eligible))
+    application.add_handler(CommandHandler("stats", cmd_stats))
     application.add_handler(CommandHandler("filters", cmd_filters))
     application.add_handler(CommandHandler("health", cmd_health))
     application.add_handler(CommandHandler("pause", cmd_pause))

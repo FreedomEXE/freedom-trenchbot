@@ -58,6 +58,8 @@ Set `DRY_RUN=true` to log would-alert tokens without posting to Telegram.
 - `DISCOVERY_MODE` (`hybrid`, `market_sampler`, or `fallback_search`)
 - `SEARCH_QUERIES`, `HYBRID_SEARCH_REFRESH_SECONDS`, `HYBRID_REFRESH_SECONDS`, `HYBRID_MAX_TOKENS`
 - `ALLOWED_THREAD_IDS` (restrict alerts to specific thread IDs in a group)
+- `CALLED_LIST_LIMIT` (max items in `/stats`)
+- `ALERT_TAGLINE` (custom line shown in alert messages)
 
 ## Commands
 - `/start` - onboarding and status

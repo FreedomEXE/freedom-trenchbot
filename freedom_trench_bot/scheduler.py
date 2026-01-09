@@ -51,6 +51,7 @@ def _extract_pair(payload: Any) -> Optional[Dict[str, Any]]:
 
 
 def _metrics_snapshot(pair: Dict[str, Any], metrics) -> str:
+    price_usd = _to_float(pair.get("priceUsd"))
     data = {
         "pairAddress": pair.get("pairAddress"),
         "marketCap": metrics.market_cap_value,
@@ -59,8 +60,16 @@ def _metrics_snapshot(pair: Dict[str, Any], metrics) -> str:
         "change1h": metrics.change_1h,
         "change6h": metrics.change_6h,
         "change24h": metrics.change_24h,
+        "priceUsd": price_usd,
     }
     return json.dumps(data, ensure_ascii=True)
+
+
+def _to_float(value: Any) -> Optional[float]:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _extract_token_meta(pair: Dict[str, Any], token_address: str) -> Tuple[str, str]:
@@ -222,6 +231,8 @@ class Scanner:
 
             name, symbol = _extract_token_meta(primary_candidate.pair, token_address)
             last_seen_metrics = _metrics_snapshot(primary_candidate.pair, primary_result.metrics)
+            price_usd = _to_float(primary_candidate.pair.get("priceUsd"))
+            market_cap_value = primary_result.metrics.market_cap_value
 
             eligible_first_at = token_row["eligible_first_at"]
             eligible_first_metrics = token_row["eligible_first_metrics"]
@@ -230,6 +241,20 @@ class Scanner:
                 eligible_first_at = now
                 eligible_first_metrics = last_seen_metrics
                 newly_eligible = True
+
+            called_price_usd = token_row["called_price_usd"]
+            if eligible_first_at and called_price_usd is None and price_usd is not None:
+                called_price_usd = price_usd
+
+            max_price_usd = token_row["max_price_usd"]
+            if eligible_first_at and price_usd is not None:
+                if max_price_usd is None or price_usd > max_price_usd:
+                    max_price_usd = price_usd
+
+            max_market_cap = token_row["max_market_cap"]
+            if eligible_first_at and market_cap_value is not None:
+                if max_market_cap is None or market_cap_value > max_market_cap:
+                    max_market_cap = market_cap_value
 
             last_eligible_at = token_row["last_eligible_at"]
             last_ineligible_at = token_row["last_ineligible_at"]
@@ -249,6 +274,9 @@ class Scanner:
                 eligible_first_metrics=eligible_first_metrics,
                 last_name=name,
                 last_symbol=symbol,
+                called_price_usd=called_price_usd,
+                max_price_usd=max_price_usd,
+                max_market_cap=max_market_cap,
             )
             await db.update_pair_checked(
                 primary_candidate.pair_address,
@@ -294,6 +322,7 @@ class Scanner:
                 config.display_timezone,
                 config.chain_id,
                 trigger_reason,
+                config.alert_tagline,
             )
 
             if config.dry_run:
