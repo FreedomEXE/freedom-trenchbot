@@ -204,6 +204,7 @@ def format_filters(ctx: AppContext) -> str:
         f"Chain: {ctx.config.chain_id}",
         f"Market cap max: {format_usd(filters.max_market_cap)}",
         f"FDV proxy: {'on' if ctx.config.use_fdv_as_mc_proxy else 'off'}",
+        f"Profile required: {'yes' if filters.require_profile else 'no'}",
         f"Change 24h min: {filters.min_change_24h:.2f}%",
         f"Change 6h min: {filters.min_change_6h:.2f}%",
         f"Change 1h min: {filters.min_change_1h:.2f}%",

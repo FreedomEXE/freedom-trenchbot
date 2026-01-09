@@ -51,6 +51,7 @@ Set `DRY_RUN=true` to log would-alert tokens without posting to Telegram.
 - `CANDIDATE_POOL_MAX` and `HOT_RECHECK_TOP_N` (pool size + hot rechecks)
 - `MIN_INELIGIBLE_MINUTES_TO_REARM` and `DEDUPE_WINDOW_HOURS` (anti-spam rearm rules)
 - `USE_FDV_AS_MC_PROXY` (market cap fallback)
+- `FILTER_REQUIRE_PROFILE` (require profile metadata in Dexscreener `info`)
 - `DB_PATH` (defaults to `./data/freedom_trench_bot.db`)
 
 ## Commands

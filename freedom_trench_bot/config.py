@@ -14,6 +14,7 @@ class FilterConfig:
     min_change_6h: float
     min_change_1h: float
     min_volume_1h: float
+    require_profile: bool = True
 
 
 @dataclass(frozen=True)
@@ -99,6 +100,7 @@ def load_config() -> Config:
         min_change_6h=float(os.getenv("FILTER_CHANGE_6H_MIN", "1")),
         min_change_1h=float(os.getenv("FILTER_CHANGE_1H_MIN", "1")),
         min_volume_1h=float(os.getenv("FILTER_VOLUME_1H_MIN", "10000")),
+        require_profile=parse_bool(os.getenv("FILTER_REQUIRE_PROFILE", "true"), True),
     )
 
     return Config(

@@ -154,3 +154,22 @@ def test_missing_marketcap_and_fdv_fails():
     result = evaluate_pair(pair, filters, use_fdv_proxy=True)
     assert result.passed is False
     assert "market cap missing" in result.reasons
+
+
+def test_profile_required_fails_without_info():
+    filters = FilterConfig(
+        max_market_cap=100000,
+        min_change_24h=1,
+        min_change_6h=1,
+        min_change_1h=1,
+        min_volume_1h=10000,
+        require_profile=True,
+    )
+    pair = {
+        "marketCap": 90000,
+        "priceChange": {"h1": 1.2, "h6": 1.5, "h24": 2.0},
+        "volume": {"h1": 12000},
+    }
+    result = evaluate_pair(pair, filters, use_fdv_proxy=True)
+    assert result.passed is False
+    assert "profile missing" in result.reasons

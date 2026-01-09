@@ -22,6 +22,21 @@ def _get_nested_number(obj: Dict[str, Any], *keys: str) -> Optional[float]:
     return _to_float(cur)
 
 
+def _has_profile(pair: Dict[str, Any]) -> bool:
+    info = pair.get("info")
+    if not isinstance(info, dict):
+        return False
+    if info.get("imageUrl") or info.get("header") or info.get("openGraph"):
+        return True
+    websites = info.get("websites")
+    if isinstance(websites, list) and websites:
+        return True
+    socials = info.get("socials")
+    if isinstance(socials, list) and socials:
+        return True
+    return False
+
+
 def extract_metrics(pair: Dict[str, Any], use_fdv_proxy: bool) -> FilterMetrics:
     market_cap = _to_float(pair.get("marketCap"))
     label = "Market Cap" if market_cap is not None else "Market Cap (missing)"
@@ -52,6 +67,9 @@ def extract_metrics(pair: Dict[str, Any], use_fdv_proxy: bool) -> FilterMetrics:
 def evaluate_pair(pair: Dict[str, Any], filters: FilterConfig, use_fdv_proxy: bool) -> FilterResult:
     metrics = extract_metrics(pair, use_fdv_proxy)
     reasons: List[str] = []
+
+    if filters.require_profile and not _has_profile(pair):
+        reasons.append("profile missing")
 
     if metrics.market_cap_value is None:
         reasons.append("market cap missing")
