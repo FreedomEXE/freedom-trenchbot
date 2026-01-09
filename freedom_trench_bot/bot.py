@@ -190,7 +190,7 @@ def format_alert_message(
         f"MCap: {format_usd(metrics.market_cap_value)}{mcap_suffix}",
         f"Vol 1h: {format_usd(metrics.volume_1h)}",
         f"Change 1h: {format_pct(metrics.change_1h)} | 6h: {format_pct(metrics.change_6h)} | 24h: {format_pct(metrics.change_24h)}",
-        trigger_reason,
+        escape_html(trigger_reason),
         f"First seen: {format_ts(first_seen_ts, tz_name)}",
         f"Dexscreener: <a href=\"{build_dex_url(pair, chain_id)}\">link</a>",
         f"Solscan: <a href=\"https://solscan.io/token/{token_address}\">link</a>",
