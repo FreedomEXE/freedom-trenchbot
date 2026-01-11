@@ -642,6 +642,14 @@ async def cmd_health(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     scan_overlap = await ctx.db.get_state_int("metrics_scan_overlap", 0)
     api_requests = await ctx.db.get_state_int("metrics_api_requests", 0)
     rate_limited = await ctx.db.get_state_int("metrics_rate_limited_count", 0)
+    wallet_runs = await ctx.db.get_state_int("metrics_wallet_runs", 0)
+    wallet_success = await ctx.db.get_state_int("metrics_wallet_success", 0)
+    wallet_fail = await ctx.db.get_state_int("metrics_wallet_fail", 0)
+    wallet_no_data = await ctx.db.get_state_int("metrics_wallet_no_data", 0)
+    wallet_api_requests = await ctx.db.get_state_int("metrics_wallet_api_requests", 0)
+    wallet_rate_limited = await ctx.db.get_state_int("metrics_wallet_rate_limited_count", 0)
+    wallet_last_at = await ctx.db.get_state_int("wallet_analysis_last_at", 0)
+    wallet_last_token = await ctx.db.get_state("wallet_analysis_last_token") or "n/a"
 
     lines = [
         "HEALTH",
@@ -651,6 +659,11 @@ async def cmd_health(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         f"Scan overlap warnings: {scan_overlap}",
         f"API requests: {api_requests}",
         f"Rate limited: {rate_limited}",
+        f"Wallet analysis: {'on' if ctx.config.wallet_analysis_enabled else 'off'} ({ctx.config.wallet_analysis_provider})",
+        f"Wallet runs: {wallet_runs}, success: {wallet_success}, fail: {wallet_fail}, no_data: {wallet_no_data}",
+        f"Wallet API: requests {wallet_api_requests}, rate_limited {wallet_rate_limited}",
+        f"Wallet last: {format_ts(wallet_last_at, ctx.config.display_timezone)}",
+        f"Wallet last token: {wallet_last_token}",
     ]
     await update.effective_message.reply_text("\n".join(lines))
 

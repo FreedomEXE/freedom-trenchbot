@@ -460,6 +460,7 @@ class Scanner:
         posted_refs: List[AlertMessageRef],
     ) -> None:
         try:
+            await self.ctx.db.increment_state_int("metrics_wallet_runs", 1)
             async with self._analysis_sem:
                 analyzer = self.ctx.wallet_analyzer
                 if analyzer is None:
@@ -469,6 +470,7 @@ class Scanner:
                     return
                 result = await analyzer.analyze(pair_address, token_address)
             if result is None:
+                await self.ctx.db.increment_state_int("metrics_wallet_no_data", 1)
                 return
             now = utc_now_ts()
             analysis_json = result.to_json()
@@ -478,6 +480,9 @@ class Scanner:
                 analysis_at=now,
                 partial=result.partial,
             )
+            await self.ctx.db.increment_state_int("metrics_wallet_success", 1)
+            await self.ctx.db.set_state("wallet_analysis_last_at", str(now))
+            await self.ctx.db.set_state("wallet_analysis_last_token", token_address)
             analysis_data = result.to_dict()
             updated_text = format_alert_message(
                 pair,
@@ -499,6 +504,11 @@ class Scanner:
                 extra={"token": token_address, "buyers": result.unique_buyers},
             )
         except Exception:
+            try:
+                await self.ctx.db.increment_state_int("metrics_wallet_fail", 1)
+                await self.ctx.db.set_state("wallet_analysis_last_error", "wallet_analysis_failed")
+            except Exception:
+                self.ctx.logger.exception("wallet_analysis_metrics_failed")
             self.ctx.logger.exception("wallet_analysis_failed", extra={"token": token_address})
         finally:
             async with self._analysis_lock:
