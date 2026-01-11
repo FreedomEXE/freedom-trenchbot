@@ -96,7 +96,7 @@ def load_config() -> Config:
         hot_recheck_top_n = candidate_pool_max
 
     chain_id = "solana"
-    display_timezone = os.getenv("DISPLAY_TIMEZONE", "UTC")
+    display_timezone = os.getenv("DISPLAY_TIMEZONE", "America/New_York")
     eligible_retention_sec = int(os.getenv("ELIGIBLE_RETENTION_HOURS", "24")) * 3600
     eligible_list_limit = int(os.getenv("ELIGIBLE_LIST_LIMIT", "20"))
     called_list_limit = int(os.getenv("CALLED_LIST_LIMIT", "50"))

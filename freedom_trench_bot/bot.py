@@ -377,9 +377,6 @@ def format_alert_message(
         "CA:",
         ca_block,
         f"MCap: {format_usd(metrics.market_cap_value)}{mcap_suffix}",
-        f"Vol 1h: {format_usd(metrics.volume_1h)}",
-        f"Change 1h: {format_pct(metrics.change_1h)} | 6h: {format_pct(metrics.change_6h)} | 24h: {format_pct(metrics.change_24h)}",
-        escape_html(trigger_reason),
     ]
     if wallet_analysis:
         label = wallet_label or "Top Wallet Call"

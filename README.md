@@ -90,7 +90,7 @@ Set `DRY_RUN=true` to log would-alert tokens without posting to Telegram.
 - `/help` - quick help
 
 ## Alert format
-Alerts fire only once when a token is first discovered eligible. The message includes token name/symbol, chain, CA, market cap (or FDV proxy), volume 1h, 1h/6h/24h changes, trigger reason, first seen, and links. When wallet analysis is enabled, a "Top Wallet Call" section is appended once the analysis completes.
+Alerts fire only once when a token is first discovered eligible. The message includes token name/symbol, chain, CA, market cap (or FDV proxy), first seen, and links. When wallet analysis is enabled, a "Top Wallet Call" section is appended once the analysis completes.
 
 ## Brand kit
 SVG logo: `assets/freedom-trench-bot.svg`
