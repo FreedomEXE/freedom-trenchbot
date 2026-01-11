@@ -38,6 +38,15 @@ class Config:
     eligible_list_limit: int
     called_list_limit: int
     alert_tagline: str
+    wallet_analysis_enabled: bool
+    wallet_analysis_provider: str
+    wallet_analysis_sample: int
+    wallet_analysis_label: str
+    wallet_analysis_max_pages: int
+    wallet_analysis_ttl_sec: int
+    fresh_wallet_max_age_days: int
+    fresh_wallet_max_tx: int
+    helius_api_key: str
 
     dex_max_rps: int
     dex_max_concurrency: int
@@ -93,6 +102,16 @@ def load_config() -> Config:
     called_list_limit = int(os.getenv("CALLED_LIST_LIMIT", "50"))
     alert_tagline = os.getenv("ALERT_TAGLINE", "Trenches Call").strip()
 
+    wallet_analysis_enabled = parse_bool(os.getenv("WALLET_ANALYSIS_ENABLED", "false"), False)
+    wallet_analysis_provider = os.getenv("WALLET_ANALYSIS_PROVIDER", "helius").strip().lower()
+    wallet_analysis_sample = int(os.getenv("WALLET_ANALYSIS_SAMPLE", "20"))
+    wallet_analysis_label = os.getenv("WALLET_ANALYSIS_LABEL", "Top Wallet Call").strip()
+    wallet_analysis_max_pages = int(os.getenv("WALLET_ANALYSIS_MAX_PAGES", "10"))
+    wallet_analysis_ttl_sec = int(os.getenv("WALLET_ANALYSIS_TTL_HOURS", "24")) * 3600
+    fresh_wallet_max_age_days = int(os.getenv("FRESH_WALLET_MAX_AGE_DAYS", "7"))
+    fresh_wallet_max_tx = int(os.getenv("FRESH_WALLET_MAX_TX", "20"))
+    helius_api_key = os.getenv("HELIUS_API_KEY", "").strip()
+
     dex_max_rps = int(os.getenv("DEX_MAX_RPS", "5"))
     dex_max_concurrency = int(os.getenv("DEX_MAX_CONCURRENCY", "2"))
     dex_timeout_sec = int(os.getenv("DEX_TIMEOUT_SEC", "10"))
@@ -139,6 +158,15 @@ def load_config() -> Config:
         eligible_list_limit=eligible_list_limit,
         called_list_limit=called_list_limit,
         alert_tagline=alert_tagline,
+        wallet_analysis_enabled=wallet_analysis_enabled,
+        wallet_analysis_provider=wallet_analysis_provider,
+        wallet_analysis_sample=wallet_analysis_sample,
+        wallet_analysis_label=wallet_analysis_label,
+        wallet_analysis_max_pages=wallet_analysis_max_pages,
+        wallet_analysis_ttl_sec=wallet_analysis_ttl_sec,
+        fresh_wallet_max_age_days=fresh_wallet_max_age_days,
+        fresh_wallet_max_tx=fresh_wallet_max_tx,
+        helius_api_key=helius_api_key,
         dex_max_rps=dex_max_rps,
         dex_max_concurrency=dex_max_concurrency,
         dex_timeout_sec=dex_timeout_sec,

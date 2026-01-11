@@ -15,6 +15,7 @@ from .discovery import DiscoveryEngine
 from .logger import setup_logging
 from .scheduler import Scanner
 from .types import AppContext
+from .wallet_analysis import WalletAnalyzer
 
 
 def main() -> None:
@@ -35,6 +36,12 @@ def main() -> None:
 
         dex = DexscreenerClient(session, config, logger, db=db)
         discovery = DiscoveryEngine(dex, config, logger)
+        wallet_analyzer = None
+        if config.wallet_analysis_enabled and config.wallet_analysis_provider == "helius":
+            if not config.helius_api_key:
+                logger.warning("wallet_analysis_disabled_missing_api_key")
+            else:
+                wallet_analyzer = WalletAnalyzer(session, config, logger, db=db)
         app_ctx = AppContext(
             config=config,
             logger=logger,
@@ -42,6 +49,7 @@ def main() -> None:
             session=session,
             dex=dex,
             discovery=discovery,
+            wallet_analyzer=wallet_analyzer,
         )
         application.bot_data["app_ctx"] = app_ctx
 
@@ -63,6 +71,8 @@ def main() -> None:
                 "allowed_threads": len(config.allowed_thread_ids),
                 "db_path": config.sqlite_path,
                 "dry_run": config.dry_run,
+                "wallet_analysis": config.wallet_analysis_enabled,
+                "wallet_provider": config.wallet_analysis_provider,
             },
         )
 

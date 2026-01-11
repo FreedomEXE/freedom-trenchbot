@@ -2,11 +2,17 @@ from __future__ import annotations
 
 import asyncio
 import json
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
 from telegram.constants import ParseMode
 
-from .bot import build_alert_keyboard, format_alert_message, build_trigger_reason
+from .bot import (
+    build_alert_keyboard,
+    format_alert_message,
+    build_trigger_reason,
+    format_wallet_analysis_update,
+)
 from .filters import evaluate_pair, extract_metrics
 from .metrics import add_lag_sample, increment_counter, increment_daily_counter, update_rate_counter
 from .types import AppContext, PairCandidate
@@ -65,6 +71,16 @@ def _metrics_snapshot(pair: Dict[str, Any], metrics) -> str:
     return json.dumps(data, ensure_ascii=True)
 
 
+def _parse_wallet_analysis(raw: Optional[str]) -> Optional[Dict[str, Any]]:
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
 def _to_float(value: Any) -> Optional[float]:
     try:
         return float(value)
@@ -90,11 +106,22 @@ def _extract_token_meta(pair: Dict[str, Any], token_address: str) -> Tuple[str, 
     return str(name), str(symbol)
 
 
+@dataclass(frozen=True)
+class AlertMessageRef:
+    chat_id: int
+    message_id: int
+    thread_id: Optional[int]
+
+
 class Scanner:
     def __init__(self, app_ctx: AppContext, bot):
         self.ctx = app_ctx
         self.bot = bot
         self._scan_lock = asyncio.Lock()
+        self._analysis_lock = asyncio.Lock()
+        self._analysis_inflight: set[str] = set()
+        concurrency = max(1, min(4, app_ctx.config.dex_max_concurrency))
+        self._analysis_sem = asyncio.Semaphore(concurrency)
 
     async def scan_job(self, context) -> None:
         if self._scan_lock.locked():
@@ -314,6 +341,9 @@ class Scanner:
 
             first_seen_ts = self._first_seen_ts(primary_candidate.pair, token_row)
             trigger_reason = build_trigger_reason(config.filters)
+            wallet_analysis = self._get_cached_wallet_analysis(
+                token_row, now, config.wallet_analysis_ttl_sec
+            )
             text = format_alert_message(
                 primary_candidate.pair,
                 token_address,
@@ -323,6 +353,8 @@ class Scanner:
                 config.chain_id,
                 trigger_reason,
                 config.alert_tagline,
+                wallet_analysis,
+                config.wallet_analysis_label,
             )
 
             if config.dry_run:
@@ -332,11 +364,20 @@ class Scanner:
                 await add_lag_sample(db, now - first_seen_ts, config.metrics_sample_size)
                 continue
 
-            posted = await self._post_alert(text, primary_candidate.pair, token_address)
-            if posted:
+            posted_refs = await self._post_alert(text, primary_candidate.pair, token_address)
+            if posted_refs:
                 await db.update_last_alerted(token_address, now)
                 await increment_counter(db, "alerted_count", 1)
                 await add_lag_sample(db, now - first_seen_ts, config.metrics_sample_size)
+                await self._maybe_schedule_wallet_analysis(
+                    token_address=token_address,
+                    pair=primary_candidate.pair,
+                    metrics=primary_result.metrics,
+                    first_seen_ts=first_seen_ts,
+                    trigger_reason=trigger_reason,
+                    posted_refs=posted_refs,
+                    cached=wallet_analysis is not None,
+                )
 
     def _dedup_candidates(self, candidates: List[PairCandidate], max_count: int) -> List[PairCandidate]:
         dedup: Dict[str, PairCandidate] = {}
@@ -360,10 +401,182 @@ class Scanner:
         first_seen = token_row["first_seen"]
         return pair_created_at or first_seen
 
-    async def _post_alert(self, text: str, pair: Dict[str, Any], token_address: str) -> bool:
+    def _get_cached_wallet_analysis(
+        self, token_row, now: int, ttl_sec: int
+    ) -> Optional[Dict[str, Any]]:
+        analysis_at = token_row["wallet_analysis_at"]
+        analysis_json = token_row["wallet_analysis_json"]
+        if not analysis_at or not analysis_json:
+            return None
+        if now - analysis_at > ttl_sec:
+            return None
+        data = _parse_wallet_analysis(analysis_json)
+        if not data:
+            return None
+        if "partial" not in data and token_row["wallet_analysis_partial"] is not None:
+            data["partial"] = bool(token_row["wallet_analysis_partial"])
+        return data
+
+    async def _maybe_schedule_wallet_analysis(
+        self,
+        token_address: str,
+        pair: Dict[str, Any],
+        metrics,
+        first_seen_ts: int,
+        trigger_reason: str,
+        posted_refs: List[AlertMessageRef],
+        cached: bool,
+    ) -> None:
+        config = self.ctx.config
+        if cached or not config.wallet_analysis_enabled:
+            return
+        if self.ctx.wallet_analyzer is None:
+            return
+        pair_address = pair.get("pairAddress")
+        if not pair_address:
+            return
+        async with self._analysis_lock:
+            if token_address in self._analysis_inflight:
+                return
+            self._analysis_inflight.add(token_address)
+        asyncio.create_task(
+            self._run_wallet_analysis(
+                token_address=token_address,
+                pair=pair,
+                metrics=metrics,
+                first_seen_ts=first_seen_ts,
+                trigger_reason=trigger_reason,
+                posted_refs=posted_refs,
+            )
+        )
+
+    async def _run_wallet_analysis(
+        self,
+        token_address: str,
+        pair: Dict[str, Any],
+        metrics,
+        first_seen_ts: int,
+        trigger_reason: str,
+        posted_refs: List[AlertMessageRef],
+    ) -> None:
+        try:
+            async with self._analysis_sem:
+                analyzer = self.ctx.wallet_analyzer
+                if analyzer is None:
+                    return
+                pair_address = pair.get("pairAddress")
+                if not pair_address:
+                    return
+                result = await analyzer.analyze(pair_address, token_address)
+            if result is None:
+                return
+            now = utc_now_ts()
+            analysis_json = result.to_json()
+            await self.ctx.db.update_wallet_analysis(
+                token_address=token_address,
+                analysis_json=analysis_json,
+                analysis_at=now,
+                partial=result.partial,
+            )
+            analysis_data = result.to_dict()
+            updated_text = format_alert_message(
+                pair,
+                token_address,
+                metrics,
+                first_seen_ts,
+                self.ctx.config.display_timezone,
+                self.ctx.config.chain_id,
+                trigger_reason,
+                self.ctx.config.alert_tagline,
+                analysis_data,
+                self.ctx.config.wallet_analysis_label,
+            )
+            await self._edit_alerts(
+                posted_refs, updated_text, pair, token_address, analysis_data
+            )
+            self.ctx.logger.info(
+                "wallet_analysis_ready",
+                extra={"token": token_address, "buyers": result.unique_buyers},
+            )
+        except Exception:
+            self.ctx.logger.exception("wallet_analysis_failed", extra={"token": token_address})
+        finally:
+            async with self._analysis_lock:
+                self._analysis_inflight.discard(token_address)
+
+    async def _edit_alerts(
+        self,
+        refs: List[AlertMessageRef],
+        text: str,
+        pair: Dict[str, Any],
+        token_address: str,
+        analysis_data: Dict[str, Any],
+    ) -> None:
+        keyboard = build_alert_keyboard(pair, token_address, self.ctx.config.chain_id)
+        for ref in refs:
+            try:
+                kwargs = {}
+                if ref.thread_id is not None:
+                    kwargs["message_thread_id"] = ref.thread_id
+                await self.bot.edit_message_text(
+                    chat_id=ref.chat_id,
+                    message_id=ref.message_id,
+                    text=text,
+                    parse_mode=ParseMode.HTML,
+                    disable_web_page_preview=True,
+                    reply_markup=keyboard,
+                    **kwargs,
+                )
+            except Exception:
+                self.ctx.logger.exception(
+                    "alert_edit_failed",
+                    extra={"chat_id": ref.chat_id, "thread_id": ref.thread_id, "token": token_address},
+                )
+                await self._post_wallet_analysis_followup(
+                    ref.chat_id, ref.thread_id, pair, token_address, analysis_data
+                )
+
+    async def _post_wallet_analysis_followup(
+        self,
+        chat_id: int,
+        thread_id: Optional[int],
+        pair: Dict[str, Any],
+        token_address: str,
+        analysis_data: Dict[str, Any],
+    ) -> None:
+        keyboard = build_alert_keyboard(pair, token_address, self.ctx.config.chain_id)
+        text = format_wallet_analysis_update(
+            pair,
+            token_address,
+            analysis_data,
+            self.ctx.config.wallet_analysis_label,
+            self.ctx.config.display_timezone,
+            self.ctx.config.chain_id,
+        )
+        try:
+            kwargs = {}
+            if thread_id is not None:
+                kwargs["message_thread_id"] = thread_id
+            await self.bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+                reply_markup=keyboard,
+                **kwargs,
+            )
+        except Exception:
+            self.ctx.logger.exception(
+                "wallet_analysis_send_failed",
+                extra={"chat_id": chat_id, "thread_id": thread_id, "token": token_address},
+            )
+
+    async def _post_alert(
+        self, text: str, pair: Dict[str, Any], token_address: str
+    ) -> List[AlertMessageRef]:
         config = self.ctx.config
         keyboard = build_alert_keyboard(pair, token_address, config.chain_id)
-        posted_any = False
+        posted_refs: List[AlertMessageRef] = []
         for chat_id in config.allowed_chat_ids:
             thread_ids = [None]
             if config.allowed_thread_ids and chat_id < 0:
@@ -373,7 +586,7 @@ class Scanner:
                     kwargs = {}
                     if thread_id is not None:
                         kwargs["message_thread_id"] = thread_id
-                    await self.bot.send_message(
+                    message = await self.bot.send_message(
                         chat_id=chat_id,
                         text=text,
                         parse_mode=ParseMode.HTML,
@@ -381,10 +594,10 @@ class Scanner:
                         reply_markup=keyboard,
                         **kwargs,
                     )
-                    posted_any = True
+                    posted_refs.append(AlertMessageRef(chat_id, message.message_id, thread_id))
                 except Exception:
                     self.ctx.logger.exception(
                         "alert_send_failed",
                         extra={"chat_id": chat_id, "thread_id": thread_id, "token": token_address},
                     )
-        return posted_any
+        return posted_refs

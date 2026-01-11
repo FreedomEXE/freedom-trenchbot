@@ -11,6 +11,7 @@ if TYPE_CHECKING:
     from .db import Database
     from .dexscreener import DexscreenerClient
     from .discovery import DiscoveryEngine
+    from .wallet_analysis import WalletAnalyzer
 
 
 @dataclass
@@ -57,3 +58,4 @@ class AppContext:
     session: "aiohttp.ClientSession"
     dex: "DexscreenerClient"
     discovery: "DiscoveryEngine"
+    wallet_analyzer: Optional["WalletAnalyzer"] = None

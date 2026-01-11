@@ -19,3 +19,21 @@ services:
         value: "30"
       - key: USE_FDV_AS_MC_PROXY
         value: "false"
+      - key: WALLET_ANALYSIS_ENABLED
+        value: "false"
+      - key: WALLET_ANALYSIS_PROVIDER
+        value: "helius"
+      - key: HELIUS_API_KEY
+        sync: false
+      - key: WALLET_ANALYSIS_SAMPLE
+        value: "20"
+      - key: WALLET_ANALYSIS_LABEL
+        value: "Top Wallet Call"
+      - key: WALLET_ANALYSIS_MAX_PAGES
+        value: "10"
+      - key: WALLET_ANALYSIS_TTL_HOURS
+        value: "24"
+      - key: FRESH_WALLET_MAX_AGE_DAYS
+        value: "7"
+      - key: FRESH_WALLET_MAX_TX
+        value: "20"

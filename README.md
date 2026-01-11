@@ -27,6 +27,17 @@ Discovery runs in hybrid mode (`DISCOVERY_MODE=hybrid`) for best recall:
 This avoids HTML scraping and stays within rate limits. Tune pool size, hot recheck count, and scan interval in `.env`.
 Set `MARKET_BASE_TOKENS` to add additional base tokens to sample.
 
+## Wallet analysis (optional)
+Wallet analysis enriches alerts with a "first buyers" snapshot (default 20 buyers), fresh wallet ratio, and average SOL balance.
+It runs asynchronously after an alert is posted and edits the original alert in place (with a follow-up message if edits fail).
+
+This requires a Helius API key:
+- `WALLET_ANALYSIS_ENABLED=true`
+- `WALLET_ANALYSIS_PROVIDER=helius`
+- `HELIUS_API_KEY=...`
+
+Older pools are best-effort due to pagination caps; the alert will note when history is partial.
+
 ## Setup
 1) Use Python 3.12.x (see `.python-version`).
 2) Create a Telegram bot and copy the token.
@@ -60,6 +71,12 @@ Set `DRY_RUN=true` to log would-alert tokens without posting to Telegram.
 - `ALLOWED_THREAD_IDS` (restrict alerts to specific thread IDs in a group)
 - `CALLED_LIST_LIMIT` (max items in `/stats`)
 - `ALERT_TAGLINE` (custom line shown in alert messages)
+- `WALLET_ANALYSIS_ENABLED` (enable first-buyer analysis)
+- `WALLET_ANALYSIS_LABEL` (custom label shown in wallet analysis section)
+- `WALLET_ANALYSIS_SAMPLE` (number of first buyers to sample)
+- `WALLET_ANALYSIS_MAX_PAGES` (pagination cap for older pools)
+- `WALLET_ANALYSIS_TTL_HOURS` (cache analysis per token)
+- `FRESH_WALLET_MAX_AGE_DAYS`, `FRESH_WALLET_MAX_TX` (fresh wallet definition)
 
 ## Commands
 - `/start` - onboarding and status
@@ -73,7 +90,7 @@ Set `DRY_RUN=true` to log would-alert tokens without posting to Telegram.
 - `/help` - quick help
 
 ## Alert format
-Alerts fire only once when a token is first discovered eligible. The message includes token name/symbol, chain, CA, market cap (or FDV proxy), volume 1h, 1h/6h/24h changes, trigger reason, first seen, and links.
+Alerts fire only once when a token is first discovered eligible. The message includes token name/symbol, chain, CA, market cap (or FDV proxy), volume 1h, 1h/6h/24h changes, trigger reason, first seen, and links. When wallet analysis is enabled, a "Top Wallet Call" section is appended once the analysis completes.
 
 ## Brand kit
 SVG logo: `assets/freedom-trench-bot.svg`

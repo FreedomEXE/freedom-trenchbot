@@ -128,6 +128,55 @@ def _to_float(value: Any) -> Optional[float]:
         return None
 
 
+def _to_int(value: Any) -> Optional[int]:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _format_sol(value: Optional[float]) -> str:
+    if value is None:
+        return "n/a"
+    return f"{value:,.2f} SOL"
+
+
+def _format_ratio(value: Optional[float]) -> str:
+    if value is None:
+        return "n/a"
+    return f"{value * 100:.1f}%"
+
+
+def format_wallet_analysis_block(
+    analysis: Dict[str, Any], label: str, tz_name: str
+) -> list[str]:
+    if not analysis:
+        return []
+    sample_size = int(analysis.get("sample_size") or 0)
+    unique_buyers = int(analysis.get("unique_buyers") or 0)
+    fresh_wallets = int(analysis.get("fresh_wallets") or 0)
+    fresh_ratio = _to_float(analysis.get("fresh_ratio"))
+    avg_sol = _to_float(analysis.get("avg_sol"))
+    median_sol = _to_float(analysis.get("median_sol"))
+    min_sol = _to_float(analysis.get("min_sol"))
+    max_sol = _to_float(analysis.get("max_sol"))
+    earliest_buy_ts = _to_int(analysis.get("earliest_buy_ts"))
+    partial = bool(analysis.get("partial"))
+
+    lines = [
+        escape_html(label),
+        f"First buyers: {unique_buyers}/{sample_size}",
+        f"Fresh wallets: {fresh_wallets} ({_format_ratio(fresh_ratio)})",
+        f"Avg SOL: {_format_sol(avg_sol)} | Median SOL: {_format_sol(median_sol)}",
+        f"SOL range: {_format_sol(min_sol)} - {_format_sol(max_sol)}",
+    ]
+    if earliest_buy_ts:
+        lines.append(f"Earliest buy: {format_ts(earliest_buy_ts, tz_name)}")
+    if partial:
+        lines.append("Analysis: partial (history cap)")
+    return lines
+
+
 def _format_mcap_from_snapshot(snapshot: Dict[str, Any]) -> str:
     value = _to_float(snapshot.get("marketCap"))
     label = snapshot.get("marketCapLabel") or "Market Cap"
@@ -295,6 +344,8 @@ def format_alert_message(
     chain_id: str,
     trigger_reason: str,
     tagline: str,
+    wallet_analysis: Optional[Dict[str, Any]] = None,
+    wallet_label: str = "",
 ) -> str:
     base = pair.get("baseToken") or {}
     quote = pair.get("quoteToken") or {}
@@ -329,10 +380,59 @@ def format_alert_message(
         f"Vol 1h: {format_usd(metrics.volume_1h)}",
         f"Change 1h: {format_pct(metrics.change_1h)} | 6h: {format_pct(metrics.change_6h)} | 24h: {format_pct(metrics.change_24h)}",
         escape_html(trigger_reason),
-        f"First seen: {format_ts(first_seen_ts, tz_name)}",
-        f"Dexscreener: <a href=\"{build_dex_url(pair, chain_id)}\">link</a>",
-        f"Solscan: <a href=\"https://solscan.io/token/{token_address}\">link</a>",
     ]
+    if wallet_analysis:
+        label = wallet_label or "Top Wallet Call"
+        lines.extend(format_wallet_analysis_block(wallet_analysis, label, tz_name))
+    lines.extend(
+        [
+            f"First seen: {format_ts(first_seen_ts, tz_name)}",
+            f"Dexscreener: <a href=\"{build_dex_url(pair, chain_id)}\">link</a>",
+            f"Solscan: <a href=\"https://solscan.io/token/{token_address}\">link</a>",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def format_wallet_analysis_update(
+    pair: dict,
+    token_address: str,
+    analysis: Dict[str, Any],
+    label: str,
+    tz_name: str,
+    chain_id: str,
+) -> str:
+    base = pair.get("baseToken") or {}
+    quote = pair.get("quoteToken") or {}
+    token_address_lc = token_address.lower()
+    token_obj = base
+    if isinstance(base, dict) and base.get("address") and base["address"].lower() == token_address_lc:
+        token_obj = base
+    elif (
+        isinstance(quote, dict)
+        and quote.get("address")
+        and quote["address"].lower() == token_address_lc
+    ):
+        token_obj = quote
+    name = escape_html(token_obj.get("name") or "Unknown")
+    symbol = escape_html(token_obj.get("symbol") or "?")
+
+    header_block = f"<pre>{WELCOME_HEADER}</pre>"
+    ca_block = f"<pre>{escape_html(token_address)}</pre>"
+    lines = [
+        header_block,
+        "Wallet analysis update",
+        f"Token: {name} ({symbol})",
+        "CA:",
+        ca_block,
+    ]
+    lines.extend(format_wallet_analysis_block(analysis, label or "Top Wallet Call", tz_name))
+    lines.extend(
+        [
+            f"Dexscreener: <a href=\"{build_dex_url(pair, chain_id)}\">link</a>",
+            f"Solscan: <a href=\"https://solscan.io/token/{token_address}\">link</a>",
+        ]
+    )
     return "\n".join(lines)
 
 

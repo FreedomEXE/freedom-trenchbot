@@ -41,7 +41,10 @@ class Database:
                 last_symbol TEXT,
                 called_price_usd REAL,
                 max_price_usd REAL,
-                max_market_cap REAL
+                max_market_cap REAL,
+                wallet_analysis_at INTEGER,
+                wallet_analysis_json TEXT,
+                wallet_analysis_partial INTEGER
             )
             """
         )
@@ -60,6 +63,9 @@ class Database:
         await self._ensure_column("tokens", "called_price_usd", "REAL")
         await self._ensure_column("tokens", "max_price_usd", "REAL")
         await self._ensure_column("tokens", "max_market_cap", "REAL")
+        await self._ensure_column("tokens", "wallet_analysis_at", "INTEGER")
+        await self._ensure_column("tokens", "wallet_analysis_json", "TEXT")
+        await self._ensure_column("tokens", "wallet_analysis_partial", "INTEGER")
         await self._migrate_token_timestamps()
         await self.conn.execute(
             """
@@ -100,6 +106,9 @@ class Database:
         )
         await self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_tokens_called_price ON tokens(called_price_usd)"
+        )
+        await self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_tokens_wallet_analysis ON tokens(wallet_analysis_at)"
         )
         await self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_pair_pool_last_seen ON pair_pool(last_seen_at)"
@@ -207,6 +216,26 @@ class Database:
                 max_market_cap,
                 token_address,
             ),
+        )
+        await self.conn.commit()
+
+    async def update_wallet_analysis(
+        self,
+        token_address: str,
+        analysis_json: str,
+        analysis_at: int,
+        partial: bool,
+    ) -> None:
+        assert self.conn is not None
+        await self.conn.execute(
+            """
+            UPDATE tokens
+            SET wallet_analysis_at = ?,
+                wallet_analysis_json = ?,
+                wallet_analysis_partial = ?
+            WHERE token_address = ?
+            """,
+            (analysis_at, analysis_json, 1 if partial else 0, token_address),
         )
         await self.conn.commit()
 
