@@ -13,7 +13,7 @@ from .bot import (
     build_trigger_reason,
     format_wallet_analysis_update,
 )
-from .flow import compute_flow
+from .flow import compute_flow, flow_5m_status
 from .filters import evaluate_pair, extract_metrics
 from .metrics import add_lag_sample, increment_counter, increment_daily_counter, update_rate_counter
 from .types import AppContext, PairCandidate
@@ -60,9 +60,14 @@ def _extract_pair(payload: Any) -> Optional[Dict[str, Any]]:
     return None
 
 
-def _metrics_snapshot(pair: Dict[str, Any], metrics) -> str:
+def _metrics_snapshot(
+    pair: Dict[str, Any],
+    metrics,
+    holder_count: Optional[int] = None,
+    holder_min: int = 100,
+) -> str:
     price_usd = _to_float(pair.get("priceUsd"))
-    flow = compute_flow(pair)
+    flow = compute_flow(pair, holder_count=holder_count, holder_min=holder_min)
     data = {
         "pairAddress": pair.get("pairAddress"),
         "marketCap": metrics.market_cap_value,
@@ -72,6 +77,7 @@ def _metrics_snapshot(pair: Dict[str, Any], metrics) -> str:
         "change6h": metrics.change_6h,
         "change24h": metrics.change_24h,
         "priceUsd": price_usd,
+        "holderCount": holder_count,
         "flow": flow,
     }
     return json.dumps(data, ensure_ascii=True)
@@ -105,6 +111,15 @@ def _snapshot_price(raw: Optional[str]) -> Optional[float]:
 def _snapshot_mcap(raw: Optional[str]) -> Optional[float]:
     snapshot = _parse_snapshot(raw)
     return _to_float(snapshot.get("marketCap"))
+
+
+def _snapshot_holder_count(raw: Optional[str]) -> Optional[int]:
+    snapshot = _parse_snapshot(raw)
+    value = snapshot.get("holderCount")
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _snapshot_pair_address(raw: Optional[str]) -> Optional[str]:
@@ -156,6 +171,7 @@ class Scanner:
         self._analysis_sem = asyncio.Semaphore(concurrency)
         self._performance_lock = asyncio.Lock()
         self._backfill_lock = asyncio.Lock()
+        self._last_flow_5m_log_at = 0
 
     async def scan_job(self, context) -> None:
         if self._scan_lock.locked():
@@ -198,7 +214,16 @@ class Scanner:
         await update_rate_counter(db, "candidates", len(fresh_pairs), now)
 
         candidates = self._dedup_candidates(fresh_pairs, config.candidate_pool_max)
+        flow_5m_total = 0
+        flow_5m_missing = 0
+        flow_5m_zero = 0
         for candidate in candidates:
+            flow_5m_total += 1
+            missing_5m, zero_5m = flow_5m_status(candidate.pair)
+            if missing_5m:
+                flow_5m_missing += 1
+            elif zero_5m:
+                flow_5m_zero += 1
             metrics = extract_metrics(candidate.pair, config.use_fdv_as_mc_proxy)
             await db.upsert_pair_pool(
                 pair_address=candidate.pair_address,
@@ -233,6 +258,12 @@ class Scanner:
             pair = _extract_pair(payload)
             if not pair:
                 continue
+            missing_5m, zero_5m = flow_5m_status(pair)
+            flow_5m_total += 1
+            if missing_5m:
+                flow_5m_missing += 1
+            elif zero_5m:
+                flow_5m_zero += 1
             hot_score = _pair_sort_key(pair)
             candidate = PairCandidate(
                 pair_address=row["pair_address"],
@@ -250,6 +281,18 @@ class Scanner:
                 candidate.hot_score,
                 _metrics_snapshot(pair, metrics),
             )
+
+        if flow_5m_total and (flow_5m_missing or flow_5m_zero):
+            if now - self._last_flow_5m_log_at >= 300:
+                logger.info(
+                    "flow_5m_stats",
+                    extra={
+                        "candidates": flow_5m_total,
+                        "missing": flow_5m_missing,
+                        "zero": flow_5m_zero,
+                    },
+                )
+                self._last_flow_5m_log_at = now
 
         await update_rate_counter(db, "pairs_fetched", hot_fetch_count, now)
         await increment_counter(db, "scanned_pairs", len(candidates))
@@ -300,7 +343,24 @@ class Scanner:
                 )
 
             name, symbol = _extract_token_meta(primary_candidate.pair, token_address)
-            last_seen_metrics = _metrics_snapshot(primary_candidate.pair, primary_result.metrics)
+            holder_count = None
+            if eligible and config.holder_count_enabled and self.ctx.helius_client:
+                holder_count = _snapshot_holder_count(token_row["eligible_first_metrics"])
+                if holder_count is None and not token_row["eligible_first_at"]:
+                    holder_count = await self.ctx.helius_client.get_token_holder_count(
+                        token_address
+                    )
+                    if holder_count is None:
+                        logger.info(
+                            "holder_count_unavailable",
+                            extra={"token": token_address, "pair": primary_candidate.pair_address},
+                        )
+            last_seen_metrics = _metrics_snapshot(
+                primary_candidate.pair,
+                primary_result.metrics,
+                holder_count=holder_count,
+                holder_min=config.holder_count_min,
+            )
             price_usd = _to_float(primary_candidate.pair.get("priceUsd"))
             market_cap_value = primary_result.metrics.market_cap_value
 
@@ -402,7 +462,11 @@ class Scanner:
             wallet_analysis = self._get_cached_wallet_analysis(
                 token_row, now, config.wallet_analysis_ttl_sec
             )
-            flow_data = compute_flow(primary_candidate.pair)
+            flow_data = compute_flow(
+                primary_candidate.pair,
+                holder_count=holder_count,
+                holder_min=config.holder_count_min,
+            )
             text = format_alert_message(
                 primary_candidate.pair,
                 token_address,
@@ -639,7 +703,15 @@ class Scanner:
             await self.ctx.db.set_state("wallet_analysis_last_at", str(now))
             await self.ctx.db.set_state("wallet_analysis_last_token", token_address)
             analysis_data = result.to_dict()
-            flow_data = compute_flow(pair)
+            holder_count = None
+            token_row = await self.ctx.db.get_token(token_address)
+            if token_row is not None:
+                holder_count = _snapshot_holder_count(token_row["eligible_first_metrics"])
+            flow_data = compute_flow(
+                pair,
+                holder_count=holder_count,
+                holder_min=self.ctx.config.holder_count_min,
+            )
             updated_text = format_alert_message(
                 pair,
                 token_address,

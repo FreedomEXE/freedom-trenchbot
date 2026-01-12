@@ -120,3 +120,12 @@ def format_ts_bold_if_past(ts: Optional[int], tz_name: str, now_ts: Optional[int
     if dt.date() < now_dt.date():
         return f"<b>{formatted}</b>"
     return formatted
+
+
+FLOW_SCORE_MIN_SAMPLE = 60
+
+
+def effective_flow_score_min(configured: int) -> int:
+    if configured <= 0:
+        return configured
+    return min(configured, FLOW_SCORE_MIN_SAMPLE)

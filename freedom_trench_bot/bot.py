@@ -21,6 +21,7 @@ from .flow import flow_from_snapshot
 from .types import AppContext, FilterMetrics
 from .utils import (
     escape_html,
+    effective_flow_score_min,
     format_duration,
     format_pct,
     format_ts,
@@ -214,6 +215,22 @@ def _format_mcap_from_snapshot(snapshot: Dict[str, Any]) -> str:
     return f"{format_usd(value)}{suffix}"
 
 
+def _snapshot_holder_count(raw: Optional[str]) -> Optional[int]:
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    value = data.get("holderCount")
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def format_eligible_list(
     rows,
     tz_name: str,
@@ -221,13 +238,17 @@ def format_eligible_list(
     flow_score_min: int,
     total_rows: int,
     missing_flow: int,
+    flow_score_min_configured: Optional[int] = None,
 ) -> str:
     hours = max(1, int(retention_sec / 3600))
     header = f"<pre>{WELCOME_HEADER}</pre>"
+    flow_line = f"Flow filter: >= {flow_score_min}"
+    if flow_score_min_configured is not None and flow_score_min_configured != flow_score_min:
+        flow_line = f"{flow_line} (configured {flow_score_min_configured})"
     if not rows:
         detail = ""
         if total_rows:
-            detail = f"\nFlow filter: >= {flow_score_min} (from {total_rows} total)"
+            detail = f"\n{flow_line} (from {total_rows} total)"
         return (
             f"{header}\nCurrently eligible (last {hours}h): 0"
             f"{detail}\nNo tokens currently eligible."
@@ -236,7 +257,7 @@ def format_eligible_list(
     lines = [
         header,
         f"Currently eligible (last {hours}h): {len(rows)}",
-        f"Flow filter: >= {flow_score_min} (from {total_rows} total)",
+        f"{flow_line} (from {total_rows} total)",
     ]
     if missing_flow:
         lines.append(f"Flow missing: {missing_flow}")
@@ -255,6 +276,11 @@ def format_eligible_list(
         flow_line = format_flow_line(_flow_from_row(row) or {})
         if flow_line:
             lines.append(flow_line)
+        holders = _snapshot_holder_count(row["last_seen_metrics"])
+        if holders is None:
+            holders = _snapshot_holder_count(row["eligible_first_metrics"])
+        if holders is not None:
+            lines.append(f"Holders: {holders:,}")
         lines.append(f"Found: {format_ts_bold_if_past(found_ts, tz_name)}")
         lines.append(f"MCap now: {_format_mcap_from_snapshot(current_snapshot)}")
         lines.append(f"MCap found: {_format_mcap_from_snapshot(found_snapshot)}")
@@ -313,6 +339,7 @@ async def send_eligible_list_message(message, ctx: AppContext) -> None:
     rows = await ctx.db.get_currently_eligible(
         ctx.config.eligible_list_limit, now - ctx.config.eligible_retention_sec
     )
+    flow_score_min = effective_flow_score_min(ctx.config.flow_score_min)
     total_rows = len(rows)
     filtered: list[Any] = []
     missing_flow = 0
@@ -321,15 +348,16 @@ async def send_eligible_list_message(message, ctx: AppContext) -> None:
         if score is None:
             missing_flow += 1
             continue
-        if score >= ctx.config.flow_score_min:
+        if score >= flow_score_min:
             filtered.append(row)
     text = format_eligible_list(
         filtered,
         ctx.config.display_timezone,
         ctx.config.eligible_retention_sec,
-        ctx.config.flow_score_min,
+        flow_score_min,
         total_rows,
         missing_flow,
+        ctx.config.flow_score_min,
     )
     await message.reply_text(text, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
 
@@ -454,16 +482,21 @@ def format_alert_message(
             f"MCap: {format_usd(metrics.market_cap_value)}{mcap_suffix}",
         ]
     )
+    holders = None
+    if flow_data:
+        holders = _to_int(flow_data.get("holders"))
+    if holders is not None:
+        lines.append(f"Holders: {holders:,}")
     if wallet_analysis:
         label = wallet_label or "Top Wallet Call"
         lines.extend(format_wallet_analysis_block(wallet_analysis, label, tz_name))
         lines.extend(
-        [
-            f"First seen: {format_ts_bold_if_past(first_seen_ts, tz_name)}",
-            f"Dexscreener: <a href=\"{build_dex_url(pair, chain_id)}\">link</a>",
-            f"Solscan: <a href=\"https://solscan.io/token/{token_address}\">link</a>",
-        ]
-    )
+            [
+                f"First seen: {format_ts_bold_if_past(first_seen_ts, tz_name)}",
+                f"Dexscreener: <a href=\"{build_dex_url(pair, chain_id)}\">link</a>",
+                f"Solscan: <a href=\"https://solscan.io/token/{token_address}\">link</a>",
+            ]
+        )
     return "\n".join(lines)
 
 
@@ -577,7 +610,13 @@ def _simulate_ladder(row) -> Optional[float]:
 
 
 def format_performance_summary(
-    rows, tz_name: str, window_label: str, total_calls: int, limit: int, flow_score_min: int
+    rows,
+    tz_name: str,
+    window_label: str,
+    total_calls: int,
+    limit: int,
+    flow_score_min: int,
+    flow_score_min_configured: Optional[int] = None,
 ) -> str:
     header = f"<pre>{WELCOME_HEADER}</pre>"
     shown = len(rows)
@@ -599,10 +638,16 @@ def format_performance_summary(
     flow_missing = 0
     sim_all: list[float] = []
     sim_flow: list[float] = []
+    bucket_stats = {
+        "Trade": {"total": 0, "tracked": 0, "hit_2x": 0, "hit_3x": 0, "hit_5x": 0},
+        "Watch": {"total": 0, "tracked": 0, "hit_2x": 0, "hit_3x": 0, "hit_5x": 0},
+        "Ignore": {"total": 0, "tracked": 0, "hit_2x": 0, "hit_3x": 0, "hit_5x": 0},
+    }
 
     for row in rows:
         called_price = row["called_price_usd"]
         max_price = row["max_price_usd"]
+        flow_score = _flow_score_from_row(row)
         multiple = None
         if called_price and max_price and called_price > 0:
             tracked += 1
@@ -615,28 +660,46 @@ def format_performance_summary(
                 hit_3x += 1
             if multiple >= 5.0:
                 hit_5x += 1
-        flow_score = _flow_score_from_row(row)
         if flow_score is None:
             flow_missing += 1
-        elif flow_score >= flow_score_min:
-            flow_total += 1
+        else:
+            if flow_score >= 75:
+                bucket = "Trade"
+            elif flow_score >= 55:
+                bucket = "Watch"
+            else:
+                bucket = "Ignore"
+            bucket_stats[bucket]["total"] += 1
             if multiple is not None:
-                flow_tracked += 1
-                flow_multiples.append(multiple)
+                bucket_stats[bucket]["tracked"] += 1
                 if multiple >= 2.0:
-                    flow_hit_2x += 1
+                    bucket_stats[bucket]["hit_2x"] += 1
                 if multiple >= 3.0:
-                    flow_hit_3x += 1
+                    bucket_stats[bucket]["hit_3x"] += 1
                 if multiple >= 5.0:
-                    flow_hit_5x += 1
+                    bucket_stats[bucket]["hit_5x"] += 1
+            if flow_score >= flow_score_min:
+                flow_total += 1
+                if multiple is not None:
+                    flow_tracked += 1
+                    flow_multiples.append(multiple)
+                    if multiple >= 2.0:
+                        flow_hit_2x += 1
+                    if multiple >= 3.0:
+                        flow_hit_3x += 1
+                    if multiple >= 5.0:
+                        flow_hit_5x += 1
         sim_value = _simulate_ladder(row)
         if sim_value is not None:
             sim_all.append(sim_value)
-            flow_score = _flow_score_from_row(row)
             if flow_score is not None and flow_score >= flow_score_min:
                 sim_flow.append(sim_value)
 
     lines = [header, f"Performance ({window_label})", f"Calls: {total_calls}, tracked: {tracked}"]
+    if flow_score_min_configured is not None and flow_score_min_configured != flow_score_min:
+        lines.append(
+            f"Flow filter (effective): >= {flow_score_min} (configured {flow_score_min_configured})"
+        )
     if total_calls > shown:
         lines.append(f"Showing: {shown} most recent (sample)")
     if tracked > 0:
@@ -679,6 +742,20 @@ def format_performance_summary(
             )
     elif flow_missing:
         lines.append(f"Flow >= {flow_score_min}: 0 (missing flow on {flow_missing})")
+
+    lines.append("Flow buckets:")
+    for bucket_name in ("Trade", "Watch", "Ignore"):
+        stats = bucket_stats[bucket_name]
+        total = stats["total"]
+        tracked_bucket = stats["tracked"]
+        line = f"{bucket_name}: {total} (tracked {tracked_bucket})"
+        if tracked_bucket:
+            line += (
+                f" | 2x {_format_ratio(stats['hit_2x'] / tracked_bucket)}"
+                f" | 3x {_format_ratio(stats['hit_3x'] / tracked_bucket)}"
+                f" | 5x {_format_ratio(stats['hit_5x'] / tracked_bucket)}"
+            )
+        lines.append(line)
 
     if sim_all:
         avg_return = statistics.fmean(sim_all) * 100
@@ -968,12 +1045,14 @@ async def cmd_performance(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     total_calls = await ctx.db.count_called_since(min_first_at)
     limit = PERFORMANCE_EXPORT_LIMIT if export else PERFORMANCE_SUMMARY_LIMIT
     rows = await ctx.db.get_called_for_performance(limit, min_first_at)
+    flow_score_min = effective_flow_score_min(ctx.config.flow_score_min)
     text = format_performance_summary(
         rows,
         ctx.config.display_timezone,
         window_label,
         total_calls,
         limit,
+        flow_score_min,
         ctx.config.flow_score_min,
     )
     await update.effective_message.reply_text(

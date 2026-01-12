@@ -2,6 +2,10 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
+HOLDER_STEP = 100
+HOLDER_BOOST_STEP = 10
+HOLDER_BOOST_MAX = 30
+
 
 def _to_float(value: Any) -> Optional[float]:
     try:
@@ -38,6 +42,17 @@ def _get_volume_1h(pair: Dict[str, Any]) -> Optional[float]:
         value = volume.get("1h")
     return _to_float(value)
 
+
+def flow_5m_status(pair: Dict[str, Any]) -> tuple[bool, bool]:
+    buys_5m = _get_txn_count(pair, "m5", "buys")
+    sells_5m = _get_txn_count(pair, "m5", "sells")
+    volume_5m = _get_volume_5m(pair)
+    missing = buys_5m is None or sells_5m is None or volume_5m is None
+    if missing:
+        return True, False
+    zero = buys_5m == 0 and sells_5m == 0 and float(volume_5m or 0.0) == 0.0
+    return False, zero
+
 def _get_volume_5m(pair: Dict[str, Any]) -> Optional[float]:
     volume = pair.get("volume")
     if not isinstance(volume, dict):
@@ -48,7 +63,11 @@ def _get_volume_5m(pair: Dict[str, Any]) -> Optional[float]:
     return _to_float(value)
 
 
-def compute_flow(pair: Dict[str, Any]) -> Dict[str, Any]:
+def compute_flow(
+    pair: Dict[str, Any],
+    holder_count: Optional[int] = None,
+    holder_min: int = 100,
+) -> Dict[str, Any]:
     buys_5m_raw = _get_txn_count(pair, "m5", "buys")
     sells_5m_raw = _get_txn_count(pair, "m5", "sells")
     volume_5m_raw = _get_volume_5m(pair)
@@ -130,6 +149,18 @@ def compute_flow(pair: Dict[str, Any]) -> Dict[str, Any]:
         elif avg_buy_1h < 150 or avg_buy_1h > 5000:
             score -= 15
 
+    holder_boost = 0
+    holders_val = None
+    if holder_count is not None:
+        try:
+            holders_val = int(holder_count)
+        except (TypeError, ValueError):
+            holders_val = None
+    if holders_val is not None and holders_val >= holder_min and (gate_5m or gate_1h):
+        steps = max(1, holders_val // max(1, HOLDER_STEP))
+        holder_boost = min(HOLDER_BOOST_MAX, steps * HOLDER_BOOST_STEP)
+        score += holder_boost
+
     if score < 0:
         score = 0
     if score > 100:
@@ -159,6 +190,8 @@ def compute_flow(pair: Dict[str, Any]) -> Dict[str, Any]:
         "gate_5m": gate_5m,
         "gate_1h": gate_1h,
         "partial": partial,
+        "holders": holders_val,
+        "holder_boost": holder_boost,
     }
 
 

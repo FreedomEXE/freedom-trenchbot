@@ -11,6 +11,7 @@ if TYPE_CHECKING:
     from .db import Database
     from .dexscreener import DexscreenerClient
     from .discovery import DiscoveryEngine
+    from .wallet_analysis import HeliusClient
     from .wallet_analysis import WalletAnalyzer
 
 
@@ -59,3 +60,4 @@ class AppContext:
     dex: "DexscreenerClient"
     discovery: "DiscoveryEngine"
     wallet_analyzer: Optional["WalletAnalyzer"] = None
+    helius_client: Optional["HeliusClient"] = None

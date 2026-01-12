@@ -47,6 +47,8 @@ class Config:
     fresh_wallet_max_age_days: int
     fresh_wallet_max_tx: int
     helius_api_key: str
+    holder_count_enabled: bool
+    holder_count_min: int
     flow_score_min: int
 
     dex_max_rps: int
@@ -112,6 +114,8 @@ def load_config() -> Config:
     fresh_wallet_max_age_days = int(os.getenv("FRESH_WALLET_MAX_AGE_DAYS", "7"))
     fresh_wallet_max_tx = int(os.getenv("FRESH_WALLET_MAX_TX", "20"))
     helius_api_key = os.getenv("HELIUS_API_KEY", "").strip()
+    holder_count_enabled = parse_bool(os.getenv("HOLDER_COUNT_ENABLED", "true"), True)
+    holder_count_min = int(os.getenv("HOLDER_COUNT_MIN", "100"))
     flow_score_min = int(os.getenv("FLOW_SCORE_MIN", "75"))
 
     dex_max_rps = int(os.getenv("DEX_MAX_RPS", "5"))
@@ -169,6 +173,8 @@ def load_config() -> Config:
         fresh_wallet_max_age_days=fresh_wallet_max_age_days,
         fresh_wallet_max_tx=fresh_wallet_max_tx,
         helius_api_key=helius_api_key,
+        holder_count_enabled=holder_count_enabled,
+        holder_count_min=holder_count_min,
         flow_score_min=flow_score_min,
         dex_max_rps=dex_max_rps,
         dex_max_concurrency=dex_max_concurrency,

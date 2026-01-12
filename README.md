@@ -38,7 +38,7 @@ This requires a Helius API key:
 
 Older pools are best-effort due to pagination caps; the alert will note when history is partial.
 
-Flow scoring uses Dexscreener 5m + 1h txns/volume to add a one-line "Flow" label and does not require Helius.
+Flow scoring uses Dexscreener 5m + 1h txns/volume to add a one-line "Flow" label. If a Helius key is configured, it also adds a holder-count boost.
 
 ## Setup
 1) Use Python 3.12.x (see `.python-version`).
@@ -73,7 +73,8 @@ Set `DRY_RUN=true` to log would-alert tokens without posting to Telegram.
 - `ALLOWED_THREAD_IDS` (restrict alerts to specific thread IDs in a group)
 - `CALLED_LIST_LIMIT` (max items in `/stats`)
 - `ALERT_TAGLINE` (custom line shown in alert messages)
-- `FLOW_SCORE_MIN` (threshold for flow-filtered performance simulations; default 75)
+- `FLOW_SCORE_MIN` (threshold for flow-filtered performance simulations; default 60, effective cap 60)
+- `HOLDER_COUNT_ENABLED` and `HOLDER_COUNT_MIN` (optional holder-count boost to Flow; requires `HELIUS_API_KEY`)
 - `WALLET_ANALYSIS_ENABLED` (enable first-buyer analysis)
 - `WALLET_ANALYSIS_LABEL` (custom label shown in wallet analysis section)
 - `WALLET_ANALYSIS_SAMPLE` (number of first buyers to sample)

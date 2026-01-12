@@ -17,12 +17,15 @@ from .logger import setup_logging
 from .scheduler import Scanner, PERFORMANCE_REFRESH_INTERVAL_SEC
 from .types import AppContext
 from .wallet_analysis import HeliusClient, WalletAnalyzer
+from .utils import effective_flow_score_min
 
 
 def main() -> None:
     load_dotenv()
     config = load_config()
     logger = setup_logging(config.log_level)
+    if config.holder_count_enabled and not config.helius_api_key:
+        logger.warning("holder_count_disabled_missing_api_key")
 
     db_dir = os.path.dirname(config.sqlite_path)
     if db_dir:
@@ -56,6 +59,7 @@ def main() -> None:
             dex=dex,
             discovery=discovery,
             wallet_analyzer=wallet_analyzer,
+            helius_client=helius_client,
         )
         application.bot_data["app_ctx"] = app_ctx
 
@@ -76,6 +80,7 @@ def main() -> None:
         )
         application.bot_data["perf_job"] = perf_job
         asyncio.create_task(scanner.backfill_called_prices())
+        flow_score_min_effective = effective_flow_score_min(config.flow_score_min)
         logger.info(
             "bot_ready",
             extra={
@@ -87,7 +92,10 @@ def main() -> None:
                 "dry_run": config.dry_run,
                 "wallet_analysis": config.wallet_analysis_enabled,
                 "wallet_provider": config.wallet_analysis_provider,
+                "holder_count_enabled": config.holder_count_enabled,
+                "holder_count_min": config.holder_count_min,
                 "flow_score_min": config.flow_score_min,
+                "flow_score_min_effective": flow_score_min_effective,
             },
         )
 

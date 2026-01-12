@@ -14,6 +14,8 @@ from .config import Config
 from .dexscreener import AsyncRateLimiter, RetryableError, TTLCache
 
 LAMP = 1_000_000_000
+TOKEN_PROGRAM_ID = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+TOKEN_ACCOUNT_SIZE = 165
 MAX_TX_PAGE_SIZE = 100
 DEFAULT_CACHE_TTL_SEC = 300
 ALLOWED_SOURCES = ("pump", "raydium", "orca")
@@ -204,6 +206,27 @@ class HeliusClient:
         result = await self.rpc("getSignaturesForAddress", [address, params])
         if isinstance(result, list):
             return result
+        return None
+
+    async def get_token_holder_count(self, mint: str) -> Optional[int]:
+        mint = mint.strip()
+        if not mint:
+            return None
+        cache_key = f"helius:holders:{mint}"
+        params = [
+            TOKEN_PROGRAM_ID,
+            {
+                "encoding": "base64",
+                "dataSlice": {"offset": 0, "length": 0},
+                "filters": [
+                    {"dataSize": TOKEN_ACCOUNT_SIZE},
+                    {"memcmp": {"offset": 0, "bytes": mint}},
+                ],
+            },
+        ]
+        result = await self.rpc("getProgramAccounts", params, cache_key=cache_key)
+        if isinstance(result, list):
+            return len(result)
         return None
 
 
