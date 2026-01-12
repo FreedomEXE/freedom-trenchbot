@@ -792,7 +792,13 @@ class Scanner:
             )
             self.ctx.logger.info(
                 "intent_analysis_ready",
-                extra={"token": token_address, "score": result.score},
+                extra={
+                    "token": token_address,
+                    "score": result.score,
+                    "label": result.label,
+                    "sample_swaps": result.sample_swaps,
+                    "partial": result.partial,
+                },
             )
         except Exception:
             self.ctx.logger.exception("intent_analysis_failed", extra={"token": token_address})

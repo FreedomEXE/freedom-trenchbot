@@ -162,7 +162,11 @@ def format_intent_line(intent: Dict[str, Any]) -> Optional[str]:
     score = intent.get("score")
     max_score = intent.get("max_score") or intent.get("maxScore")
     label = intent.get("label")
-    if score is None or max_score is None or label is None:
+    if label is None:
+        return None
+    if str(label) == "Unavailable":
+        return "Intent: Unavailable"
+    if score is None or max_score is None:
         return None
     try:
         score_val = int(score)

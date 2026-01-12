@@ -424,8 +424,21 @@ class IntentAnalyzer:
         if not self.enabled:
             return None
         swaps, partial = await self._fetch_swaps(pair_address, token_address)
+        if not swaps and pair_address != token_address:
+            swaps, partial = await self._fetch_swaps(token_address, token_address)
         if not swaps:
-            return None
+            return IntentAnalysisResult(
+                score=0,
+                max_score=3,
+                label="Unavailable",
+                sample_swaps=0,
+                buy_count=0,
+                sell_count=0,
+                median_gap_sec=None,
+                size_cv=None,
+                sell_ratio=None,
+                partial=True,
+            )
         swaps.sort(key=lambda item: item[1])
         swaps = swaps[: self.sample_swaps]
 
