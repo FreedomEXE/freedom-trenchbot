@@ -17,6 +17,12 @@ LAMP = 1_000_000_000
 MAX_TX_PAGE_SIZE = 100
 DEFAULT_CACHE_TTL_SEC = 300
 ALLOWED_SOURCES = ("pump", "raydium", "orca")
+INTENT_SWAP_SAMPLE = 40
+INTENT_MAX_PAGES = 5
+INTENT_MIN_BUYS = 8
+INTENT_CLUSTER_GAP_SEC = 45
+INTENT_SYMMETRY_CV_MAX = 0.6
+INTENT_SELL_RATIO_MAX = 0.35
 
 
 @dataclass(frozen=True)
@@ -46,6 +52,37 @@ class WalletAnalysisResult:
             "earliest_buy_ts": self.earliest_buy_ts,
             "partial": self.partial,
             "source": self.source,
+        }
+
+    def to_json(self) -> str:
+        return json.dumps(self.to_dict(), ensure_ascii=True)
+
+
+@dataclass(frozen=True)
+class IntentAnalysisResult:
+    score: int
+    max_score: int
+    label: str
+    sample_swaps: int
+    buy_count: int
+    sell_count: int
+    median_gap_sec: Optional[float]
+    size_cv: Optional[float]
+    sell_ratio: Optional[float]
+    partial: bool
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "score": self.score,
+            "max_score": self.max_score,
+            "label": self.label,
+            "sample_swaps": self.sample_swaps,
+            "buy_count": self.buy_count,
+            "sell_count": self.sell_count,
+            "median_gap_sec": self.median_gap_sec,
+            "size_cv": self.size_cv,
+            "sell_ratio": self.sell_ratio,
+            "partial": self.partial,
         }
 
     def to_json(self) -> str:
@@ -171,12 +208,19 @@ class HeliusClient:
 
 
 class WalletAnalyzer:
-    def __init__(self, session: aiohttp.ClientSession, config: Config, logger, db=None) -> None:
+    def __init__(
+        self,
+        session: aiohttp.ClientSession,
+        config: Config,
+        logger,
+        db=None,
+        client: Optional[HeliusClient] = None,
+    ) -> None:
         self.config = config
         self.logger = logger
         self.db = db
         self.enabled = config.wallet_analysis_enabled and config.wallet_analysis_provider == "helius"
-        self.client = HeliusClient(session, config, logger, db=db)
+        self.client = client or HeliusClient(session, config, logger, db=db)
         self.sample_size = max(1, config.wallet_analysis_sample)
         self.max_pages = max(1, config.wallet_analysis_max_pages)
         self.max_age_days = max(1, config.fresh_wallet_max_age_days)
@@ -357,3 +401,152 @@ def _to_int(ts: Any) -> Optional[int]:
         return int(ts)
     except (TypeError, ValueError):
         return None
+
+
+class IntentAnalyzer:
+    def __init__(
+        self,
+        client: HeliusClient,
+        config: Config,
+        logger,
+        db=None,
+    ) -> None:
+        self.client = client
+        self.logger = logger
+        self.db = db
+        self.enabled = bool(client.api_key)
+        self.sample_swaps = INTENT_SWAP_SAMPLE
+        self.max_pages = INTENT_MAX_PAGES
+
+    async def analyze(
+        self, pair_address: str, token_address: str
+    ) -> Optional[IntentAnalysisResult]:
+        if not self.enabled:
+            return None
+        swaps, partial = await self._fetch_swaps(pair_address, token_address)
+        if not swaps:
+            return None
+        swaps.sort(key=lambda item: item[1])
+        swaps = swaps[: self.sample_swaps]
+
+        buy_sizes = [size for is_buy, _ts, size in swaps if is_buy and size is not None]
+        buy_times = [ts for is_buy, ts, _size in swaps if is_buy]
+        sell_count = len([1 for is_buy, _ts, _size in swaps if not is_buy])
+        buy_count = len(buy_times)
+        total = buy_count + sell_count
+
+        median_gap = None
+        if buy_count >= 2:
+            gaps = [b - a for a, b in zip(buy_times, buy_times[1:]) if b and a]
+            if gaps:
+                median_gap = statistics.median(gaps)
+
+        size_cv = None
+        if len(buy_sizes) >= 2:
+            mean_val = statistics.fmean(buy_sizes)
+            if mean_val > 0:
+                size_cv = statistics.pstdev(buy_sizes) / mean_val
+
+        sell_ratio = None
+        if total > 0:
+            sell_ratio = sell_count / total
+
+        score = 0
+        max_score = 3
+        if buy_count >= INTENT_MIN_BUYS and median_gap is not None:
+            if median_gap <= INTENT_CLUSTER_GAP_SEC:
+                score += 1
+        if buy_count >= INTENT_MIN_BUYS and size_cv is not None:
+            if size_cv <= INTENT_SYMMETRY_CV_MAX:
+                score += 1
+        if total >= INTENT_MIN_BUYS and sell_ratio is not None:
+            if sell_ratio <= INTENT_SELL_RATIO_MAX:
+                score += 1
+
+        label = _intent_label(score)
+        partial = partial or buy_count < INTENT_MIN_BUYS or total < INTENT_MIN_BUYS
+
+        return IntentAnalysisResult(
+            score=score,
+            max_score=max_score,
+            label=label,
+            sample_swaps=len(swaps),
+            buy_count=buy_count,
+            sell_count=sell_count,
+            median_gap_sec=median_gap,
+            size_cv=size_cv,
+            sell_ratio=sell_ratio,
+            partial=partial,
+        )
+
+    async def _fetch_swaps(
+        self, pair_address: str, token_address: str
+    ) -> Tuple[List[Tuple[bool, int, Optional[float]]], bool]:
+        swaps: List[Tuple[bool, int, Optional[float]]] = []
+        partial = False
+        before: Optional[str] = None
+        token_lc = token_address.lower()
+
+        for _page in range(self.max_pages):
+            txs = await self.client.get_address_transactions(pair_address, before, MAX_TX_PAGE_SIZE)
+            if not txs:
+                break
+            for tx in txs:
+                swap = _extract_swap(tx, token_lc)
+                if swap is None:
+                    continue
+                swaps.append(swap)
+                if len(swaps) >= self.sample_swaps:
+                    break
+            if len(swaps) >= self.sample_swaps:
+                break
+            before = txs[-1].get("signature")
+            if not before:
+                break
+        else:
+            partial = True
+
+        return swaps, partial
+
+
+def _intent_label(score: int) -> str:
+    if score >= 3:
+        return "Strong"
+    if score == 2:
+        return "Mixed"
+    return "Weak"
+
+
+def _extract_swap(tx: Dict[str, Any], token_lc: str) -> Optional[Tuple[bool, int, Optional[float]]]:
+    source = str(tx.get("source") or "").lower()
+    if not any(key in source for key in ALLOWED_SOURCES):
+        return None
+    events = tx.get("events")
+    if not isinstance(events, dict):
+        return None
+    swap = events.get("swap")
+    if not isinstance(swap, dict):
+        return None
+    ts = _to_int(tx.get("timestamp"))
+    if ts is None:
+        return None
+
+    token_outputs = swap.get("tokenOutputs") or []
+    for item in token_outputs:
+        if not isinstance(item, dict):
+            continue
+        mint = item.get("mint")
+        if isinstance(mint, str) and mint.lower() == token_lc:
+            amount = _to_float(item.get("amount"))
+            return True, ts, amount
+
+    token_inputs = swap.get("tokenInputs") or []
+    for item in token_inputs:
+        if not isinstance(item, dict):
+            continue
+        mint = item.get("mint")
+        if isinstance(mint, str) and mint.lower() == token_lc:
+            amount = _to_float(item.get("amount"))
+            return False, ts, amount
+
+    return None

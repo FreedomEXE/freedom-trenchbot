@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import csv
+import io
 import json
 import statistics
 from typing import Any, Dict, Optional
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputFile, Update
 from telegram.constants import ChatType, ParseMode
 from telegram.ext import (
     Application,
@@ -52,6 +54,7 @@ STARTUP_FINAL_FRAME = (
 PERFORMANCE_LOOKBACK_DAYS = 7
 PERFORMANCE_SUMMARY_LIMIT = 5000
 PERFORMANCE_TOP_N = 5
+PERFORMANCE_EXPORT_LIMIT = 50000
 
 HELP_TEXT = (
     "/start - onboarding and status\n"
@@ -151,6 +154,23 @@ def _format_ratio(value: Optional[float]) -> str:
     if value is None:
         return "n/a"
     return f"{value * 100:.1f}%"
+
+
+def format_intent_line(intent: Dict[str, Any]) -> Optional[str]:
+    if not intent:
+        return None
+    score = intent.get("score")
+    max_score = intent.get("max_score") or intent.get("maxScore")
+    label = intent.get("label")
+    if score is None or max_score is None or label is None:
+        return None
+    try:
+        score_val = int(score)
+        max_val = int(max_score)
+    except (TypeError, ValueError):
+        return None
+    label_text = escape_html(str(label))
+    return f"Intent: {label_text} ({score_val}/{max_val})"
 
 
 def format_wallet_analysis_block(
@@ -352,6 +372,7 @@ def format_alert_message(
     tagline: str,
     wallet_analysis: Optional[Dict[str, Any]] = None,
     wallet_label: str = "",
+    intent_data: Optional[Dict[str, Any]] = None,
 ) -> str:
     base = pair.get("baseToken") or {}
     quote = pair.get("quoteToken") or {}
@@ -378,12 +399,20 @@ def format_alert_message(
     lines = [
         header_block,
         escape_html(tagline),
-        f"Token: {name} ({symbol})",
-        "Chain: Solana",
-        "CA:",
-        ca_block,
-        f"MCap: {format_usd(metrics.market_cap_value)}{mcap_suffix}",
     ]
+    if intent_data:
+        intent_line = format_intent_line(intent_data)
+        if intent_line:
+            lines.append(intent_line)
+    lines.extend(
+        [
+            f"Token: {name} ({symbol})",
+            "Chain: Solana",
+            "CA:",
+            ca_block,
+            f"MCap: {format_usd(metrics.market_cap_value)}{mcap_suffix}",
+        ]
+    )
     if wallet_analysis:
         label = wallet_label or "Top Wallet Call"
         lines.extend(format_wallet_analysis_block(wallet_analysis, label, tz_name))
@@ -439,17 +468,62 @@ def format_wallet_analysis_update(
     return "\n".join(lines)
 
 
+def format_intent_update(
+    pair: dict,
+    token_address: str,
+    intent: Dict[str, Any],
+    tz_name: str,
+    chain_id: str,
+) -> str:
+    base = pair.get("baseToken") or {}
+    quote = pair.get("quoteToken") or {}
+    token_address_lc = token_address.lower()
+    token_obj = base
+    if isinstance(base, dict) and base.get("address") and base["address"].lower() == token_address_lc:
+        token_obj = base
+    elif (
+        isinstance(quote, dict)
+        and quote.get("address")
+        and quote["address"].lower() == token_address_lc
+    ):
+        token_obj = quote
+    name = escape_html(token_obj.get("name") or "Unknown")
+    symbol = escape_html(token_obj.get("symbol") or "?")
+
+    header_block = f"<pre>{WELCOME_HEADER}</pre>"
+    ca_block = f"<pre>{escape_html(token_address)}</pre>"
+    lines = [
+        header_block,
+        "Intent update",
+        f"Token: {name} ({symbol})",
+        "CA:",
+        ca_block,
+    ]
+    intent_line = format_intent_line(intent)
+    if intent_line:
+        lines.append(intent_line)
+    lines.extend(
+        [
+            f"Dexscreener: <a href=\"{build_dex_url(pair, chain_id)}\">link</a>",
+            f"Solscan: <a href=\"https://solscan.io/token/{token_address}\">link</a>",
+        ]
+    )
+    return "\n".join(lines)
+
+
 def _format_multiple(value: Optional[float]) -> str:
     if value is None:
         return "n/a"
     return f"{value:.2f}x"
 
 
-def format_performance_summary(rows, tz_name: str) -> str:
+def format_performance_summary(
+    rows, tz_name: str, window_label: str, total_calls: int, limit: int
+) -> str:
     header = f"<pre>{WELCOME_HEADER}</pre>"
-    total = len(rows)
-    if total == 0:
-        return f"{header}\nPerformance (last {PERFORMANCE_LOOKBACK_DAYS}d): 0\nNo calls yet."
+    shown = len(rows)
+    if total_calls == 0:
+        return f"{header}\nPerformance ({window_label}): 0\nNo calls yet."
 
     tracked = 0
     hit_2x = 0
@@ -473,11 +547,9 @@ def format_performance_summary(rows, tz_name: str) -> str:
             if multiple >= 5.0:
                 hit_5x += 1
 
-    lines = [
-        header,
-        f"Performance (last {PERFORMANCE_LOOKBACK_DAYS}d)",
-        f"Calls: {total}, tracked: {tracked}",
-    ]
+    lines = [header, f"Performance ({window_label})", f"Calls: {total_calls}, tracked: {tracked}"]
+    if total_calls > shown:
+        lines.append(f"Showing: {shown} most recent (sample)")
     if tracked > 0:
         lines.extend(
             [
@@ -507,6 +579,46 @@ def format_performance_summary(rows, tz_name: str) -> str:
 
     lines.append("Note: best-effort based on tracked updates.")
     return "\n".join(lines)
+
+
+def build_performance_csv(rows, tz_name: str) -> bytes:
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(
+        [
+            "token_address",
+            "name",
+            "symbol",
+            "called_at",
+            "called_price_usd",
+            "max_price_usd",
+            "max_multiple",
+            "hit_2x_at",
+            "hit_3x_at",
+            "hit_5x_at",
+        ]
+    )
+    for row in rows:
+        called_price = row["called_price_usd"]
+        max_price = row["max_price_usd"]
+        multiple = None
+        if called_price and max_price and called_price > 0:
+            multiple = max_price / called_price
+        writer.writerow(
+            [
+                row["token_address"],
+                row["last_name"] or "Unknown",
+                row["last_symbol"] or "?",
+                format_ts(row["eligible_first_at"], tz_name),
+                called_price if called_price is not None else "",
+                max_price if max_price is not None else "",
+                f"{multiple:.2f}" if multiple is not None else "",
+                format_ts(row["hit_2x_at"], tz_name),
+                format_ts(row["hit_3x_at"], tz_name),
+                format_ts(row["hit_5x_at"], tz_name),
+            ]
+        )
+    return output.getvalue().encode("utf-8")
 
 
 def format_filters(ctx: AppContext) -> str:
@@ -706,15 +818,53 @@ async def cmd_performance(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await update.effective_message.reply_text("Bot is starting, try again in a moment.")
         return
     now = utc_now_ts()
-    rows = await ctx.db.get_called_for_performance(
-        PERFORMANCE_SUMMARY_LIMIT, now - PERFORMANCE_LOOKBACK_DAYS * 86400
+    min_first_at = now - PERFORMANCE_LOOKBACK_DAYS * 86400
+    window_label = f"last {PERFORMANCE_LOOKBACK_DAYS}d"
+    export = False
+    if context.args:
+        for raw in context.args:
+            arg = raw.strip().lower()
+            if arg in ("list", "export", "csv"):
+                export = True
+                continue
+            if arg in ("all", "alltime", "all-time"):
+                min_first_at = None
+                window_label = "all-time"
+                continue
+            duration = parse_duration(arg)
+            if duration is None:
+                await update.effective_message.reply_text(
+                    "Usage: /performance [7d|30d|all] [export]"
+                )
+                return
+            min_first_at = now - duration
+            if duration % 86400 == 0:
+                window_label = f"last {duration // 86400}d"
+            else:
+                window_label = f"last {format_duration(duration)}"
+
+    total_calls = await ctx.db.count_called_since(min_first_at)
+    limit = PERFORMANCE_EXPORT_LIMIT if export else PERFORMANCE_SUMMARY_LIMIT
+    rows = await ctx.db.get_called_for_performance(limit, min_first_at)
+    text = format_performance_summary(
+        rows,
+        ctx.config.display_timezone,
+        window_label,
+        total_calls,
+        limit,
     )
-    text = format_performance_summary(rows, ctx.config.display_timezone)
     await update.effective_message.reply_text(
         text,
         parse_mode=ParseMode.HTML,
         disable_web_page_preview=True,
     )
+    if export and rows:
+        csv_bytes = build_performance_csv(rows, ctx.config.display_timezone)
+        filename = f"performance_{window_label.replace(' ', '_')}.csv"
+        await update.effective_message.reply_document(
+            document=InputFile(io.BytesIO(csv_bytes), filename=filename),
+            caption=f"Performance export ({window_label})",
+        )
 
 
 async def cmd_health(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

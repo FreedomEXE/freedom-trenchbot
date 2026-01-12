@@ -38,6 +38,8 @@ This requires a Helius API key:
 
 Older pools are best-effort due to pagination caps; the alert will note when history is partial.
 
+Intent scoring uses the same Helius data to add a one-line "Intent" label once available. It is enabled automatically when `HELIUS_API_KEY` is set.
+
 ## Setup
 1) Use Python 3.12.x (see `.python-version`).
 2) Create a Telegram bot and copy the token.
@@ -83,7 +85,7 @@ Set `DRY_RUN=true` to log would-alert tokens without posting to Telegram.
 - `/status` - monitoring status, last scan, counters, filters
 - `/eligible` - list currently eligible tokens
 - `/filters` - current filters
-- `/performance` - 7 day performance summary
+- `/performance [7d|30d|all] [export]` - performance summary, optional CSV export
 - `/health` - health summary (admin only)
 - `/pause` - pause monitoring (admin only)
 - `/resume` - resume monitoring (admin only)
@@ -91,7 +93,7 @@ Set `DRY_RUN=true` to log would-alert tokens without posting to Telegram.
 - `/help` - quick help
 
 ## Alert format
-Alerts fire only once when a token is first discovered eligible. The message includes token name/symbol, chain, CA, market cap (or FDV proxy), first seen, and links. When wallet analysis is enabled, a "Top Wallet Call" section is appended once the analysis completes.
+Alerts fire only once when a token is first discovered eligible. The message includes token name/symbol, chain, CA, market cap (or FDV proxy), first seen, and links. When intent analysis is available, a one-line "Intent" score is appended. When wallet analysis is enabled, a "Top Wallet Call" section is appended once the analysis completes.
 
 ## Brand kit
 SVG logo: `assets/freedom-trench-bot.svg`

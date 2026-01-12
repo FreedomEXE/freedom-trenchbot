@@ -12,6 +12,7 @@ from .bot import (
     format_alert_message,
     build_trigger_reason,
     format_wallet_analysis_update,
+    format_intent_update,
 )
 from .filters import evaluate_pair, extract_metrics
 from .metrics import add_lag_sample, increment_counter, increment_daily_counter, update_rate_counter
@@ -153,6 +154,8 @@ class Scanner:
         self._analysis_sem = asyncio.Semaphore(concurrency)
         self._performance_lock = asyncio.Lock()
         self._backfill_lock = asyncio.Lock()
+        self._intent_lock = asyncio.Lock()
+        self._intent_inflight: set[str] = set()
 
     async def scan_job(self, context) -> None:
         if self._scan_lock.locked():
@@ -399,6 +402,7 @@ class Scanner:
             wallet_analysis = self._get_cached_wallet_analysis(
                 token_row, now, config.wallet_analysis_ttl_sec
             )
+            intent_data = self._get_cached_intent(token_row, now, config.wallet_analysis_ttl_sec)
             text = format_alert_message(
                 primary_candidate.pair,
                 token_address,
@@ -410,6 +414,7 @@ class Scanner:
                 config.alert_tagline,
                 wallet_analysis,
                 config.wallet_analysis_label,
+                intent_data,
             )
 
             if config.dry_run:
@@ -432,6 +437,15 @@ class Scanner:
                     trigger_reason=trigger_reason,
                     posted_refs=posted_refs,
                     cached=wallet_analysis is not None,
+                )
+                await self._maybe_schedule_intent_analysis(
+                    token_address=token_address,
+                    pair=primary_candidate.pair,
+                    metrics=primary_result.metrics,
+                    first_seen_ts=first_seen_ts,
+                    trigger_reason=trigger_reason,
+                    posted_refs=posted_refs,
+                    cached=intent_data is not None,
                 )
 
     async def backfill_called_prices(self) -> None:
@@ -567,6 +581,18 @@ class Scanner:
             data["partial"] = bool(token_row["wallet_analysis_partial"])
         return data
 
+    def _get_cached_intent(
+        self, token_row, now: int, ttl_sec: int
+    ) -> Optional[Dict[str, Any]]:
+        intent_at = token_row["intent_at"]
+        intent_json = token_row["intent_json"]
+        if not intent_at or not intent_json:
+            return None
+        if now - intent_at > ttl_sec:
+            return None
+        data = _parse_wallet_analysis(intent_json)
+        return data if data else None
+
     async def _maybe_schedule_wallet_analysis(
         self,
         token_address: str,
@@ -634,6 +660,12 @@ class Scanner:
             await self.ctx.db.set_state("wallet_analysis_last_at", str(now))
             await self.ctx.db.set_state("wallet_analysis_last_token", token_address)
             analysis_data = result.to_dict()
+            token_row = await self.ctx.db.get_token(token_address)
+            intent_data = None
+            if token_row is not None:
+                intent_data = self._get_cached_intent(
+                    token_row, now, self.ctx.config.wallet_analysis_ttl_sec
+                )
             updated_text = format_alert_message(
                 pair,
                 token_address,
@@ -645,9 +677,15 @@ class Scanner:
                 self.ctx.config.alert_tagline,
                 analysis_data,
                 self.ctx.config.wallet_analysis_label,
+                intent_data,
             )
             await self._edit_alerts(
-                posted_refs, updated_text, pair, token_address, analysis_data
+                posted_refs,
+                updated_text,
+                pair,
+                token_address,
+                followup=self._post_wallet_analysis_followup,
+                followup_payload=analysis_data,
             )
             self.ctx.logger.info(
                 "wallet_analysis_ready",
@@ -664,13 +702,112 @@ class Scanner:
             async with self._analysis_lock:
                 self._analysis_inflight.discard(token_address)
 
+    async def _maybe_schedule_intent_analysis(
+        self,
+        token_address: str,
+        pair: Dict[str, Any],
+        metrics,
+        first_seen_ts: int,
+        trigger_reason: str,
+        posted_refs: List[AlertMessageRef],
+        cached: bool,
+    ) -> None:
+        if cached:
+            return
+        intent_analyzer = self.ctx.intent_analyzer
+        if intent_analyzer is None or not intent_analyzer.enabled:
+            return
+        pair_address = pair.get("pairAddress")
+        if not pair_address:
+            return
+        async with self._intent_lock:
+            if token_address in self._intent_inflight:
+                return
+            self._intent_inflight.add(token_address)
+        asyncio.create_task(
+            self._run_intent_analysis(
+                token_address=token_address,
+                pair=pair,
+                metrics=metrics,
+                first_seen_ts=first_seen_ts,
+                trigger_reason=trigger_reason,
+                posted_refs=posted_refs,
+            )
+        )
+
+    async def _run_intent_analysis(
+        self,
+        token_address: str,
+        pair: Dict[str, Any],
+        metrics,
+        first_seen_ts: int,
+        trigger_reason: str,
+        posted_refs: List[AlertMessageRef],
+    ) -> None:
+        try:
+            async with self._analysis_sem:
+                analyzer = self.ctx.intent_analyzer
+                if analyzer is None:
+                    return
+                pair_address = pair.get("pairAddress")
+                if not pair_address:
+                    return
+                result = await analyzer.analyze(pair_address, token_address)
+            if result is None:
+                return
+            now = utc_now_ts()
+            await self.ctx.db.update_intent_analysis(
+                token_address=token_address,
+                score=result.score,
+                label=result.label,
+                intent_json=result.to_json(),
+                intent_at=now,
+            )
+            token_row = await self.ctx.db.get_token(token_address)
+            wallet_analysis = None
+            if token_row is not None:
+                wallet_analysis = self._get_cached_wallet_analysis(
+                    token_row, now, self.ctx.config.wallet_analysis_ttl_sec
+                )
+            updated_text = format_alert_message(
+                pair,
+                token_address,
+                metrics,
+                first_seen_ts,
+                self.ctx.config.display_timezone,
+                self.ctx.config.chain_id,
+                trigger_reason,
+                self.ctx.config.alert_tagline,
+                wallet_analysis,
+                self.ctx.config.wallet_analysis_label,
+                result.to_dict(),
+            )
+            await self._edit_alerts(
+                posted_refs,
+                updated_text,
+                pair,
+                token_address,
+                followup=self._post_intent_followup,
+                followup_payload=result.to_dict(),
+            )
+            self.ctx.logger.info(
+                "intent_analysis_ready",
+                extra={"token": token_address, "score": result.score},
+            )
+        except Exception:
+            self.ctx.logger.exception("intent_analysis_failed", extra={"token": token_address})
+        finally:
+            async with self._intent_lock:
+                self._intent_inflight.discard(token_address)
+
     async def _edit_alerts(
         self,
         refs: List[AlertMessageRef],
         text: str,
         pair: Dict[str, Any],
         token_address: str,
-        analysis_data: Dict[str, Any],
+        followup=None,
+        followup_payload: Optional[Dict[str, Any]] = None,
     ) -> None:
         keyboard = build_alert_keyboard(pair, token_address, self.ctx.config.chain_id)
         for ref in refs:
@@ -692,9 +829,14 @@ class Scanner:
                     "alert_edit_failed",
                     extra={"chat_id": ref.chat_id, "thread_id": ref.thread_id, "token": token_address},
                 )
-                await self._post_wallet_analysis_followup(
-                    ref.chat_id, ref.thread_id, pair, token_address, analysis_data
-                )
+                if followup is not None:
+                    await followup(
+                        ref.chat_id,
+                        ref.thread_id,
+                        pair,
+                        token_address,
+                        followup_payload or {},
+                    )
 
     async def _post_wallet_analysis_followup(
         self,
@@ -728,6 +870,40 @@ class Scanner:
         except Exception:
             self.ctx.logger.exception(
                 "wallet_analysis_send_failed",
+                extra={"chat_id": chat_id, "thread_id": thread_id, "token": token_address},
+            )
+
+    async def _post_intent_followup(
+        self,
+        chat_id: int,
+        thread_id: Optional[int],
+        pair: Dict[str, Any],
+        token_address: str,
+        intent_data: Dict[str, Any],
+    ) -> None:
+        keyboard = build_alert_keyboard(pair, token_address, self.ctx.config.chain_id)
+        text = format_intent_update(
+            pair,
+            token_address,
+            intent_data,
+            self.ctx.config.display_timezone,
+            self.ctx.config.chain_id,
+        )
+        try:
+            kwargs = {}
+            if thread_id is not None:
+                kwargs["message_thread_id"] = thread_id
+            await self.bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+                reply_markup=keyboard,
+                **kwargs,
+            )
+        except Exception:
+            self.ctx.logger.exception(
+                "intent_send_failed",
                 extra={"chat_id": chat_id, "thread_id": thread_id, "token": token_address},
             )
 

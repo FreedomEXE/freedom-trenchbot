@@ -45,6 +45,10 @@ class Database:
                 wallet_analysis_at INTEGER,
                 wallet_analysis_json TEXT,
                 wallet_analysis_partial INTEGER,
+                intent_score INTEGER,
+                intent_label TEXT,
+                intent_at INTEGER,
+                intent_json TEXT,
                 hit_2x_at INTEGER,
                 hit_3x_at INTEGER,
                 hit_5x_at INTEGER
@@ -69,6 +73,10 @@ class Database:
         await self._ensure_column("tokens", "wallet_analysis_at", "INTEGER")
         await self._ensure_column("tokens", "wallet_analysis_json", "TEXT")
         await self._ensure_column("tokens", "wallet_analysis_partial", "INTEGER")
+        await self._ensure_column("tokens", "intent_score", "INTEGER")
+        await self._ensure_column("tokens", "intent_label", "TEXT")
+        await self._ensure_column("tokens", "intent_at", "INTEGER")
+        await self._ensure_column("tokens", "intent_json", "TEXT")
         await self._ensure_column("tokens", "hit_2x_at", "INTEGER")
         await self._ensure_column("tokens", "hit_3x_at", "INTEGER")
         await self._ensure_column("tokens", "hit_5x_at", "INTEGER")
@@ -254,6 +262,28 @@ class Database:
         )
         await self.conn.commit()
 
+    async def update_intent_analysis(
+        self,
+        token_address: str,
+        score: int,
+        label: str,
+        intent_json: str,
+        intent_at: int,
+    ) -> None:
+        assert self.conn is not None
+        await self.conn.execute(
+            """
+            UPDATE tokens
+            SET intent_score = ?,
+                intent_label = ?,
+                intent_json = ?,
+                intent_at = ?
+            WHERE token_address = ?
+            """,
+            (score, label, intent_json, intent_at, token_address),
+        )
+        await self.conn.commit()
+
     async def get_tokens_missing_called_price(self, limit: int) -> List[aiosqlite.Row]:
         assert self.conn is not None
         cur = await self.conn.execute(
@@ -292,25 +322,59 @@ class Database:
         await self.conn.commit()
 
     async def get_called_for_performance(
-        self, limit: int, min_first_at: int
+        self, limit: int, min_first_at: Optional[int]
     ) -> List[aiosqlite.Row]:
         assert self.conn is not None
-        cur = await self.conn.execute(
-            """
-            SELECT token_address, eligible_first_at, last_name, last_symbol,
-                   called_price_usd, max_price_usd,
-                   hit_2x_at, hit_3x_at, hit_5x_at
-            FROM tokens
-            WHERE eligible_first_at IS NOT NULL
-              AND eligible_first_at >= ?
-            ORDER BY eligible_first_at DESC
-            LIMIT ?
-            """,
-            (min_first_at, limit),
-        )
+        if min_first_at is None:
+            cur = await self.conn.execute(
+                """
+                SELECT token_address, eligible_first_at, last_name, last_symbol,
+                       called_price_usd, max_price_usd,
+                       hit_2x_at, hit_3x_at, hit_5x_at
+                FROM tokens
+                WHERE eligible_first_at IS NOT NULL
+                ORDER BY eligible_first_at DESC
+                LIMIT ?
+                """,
+                (limit,),
+            )
+        else:
+            cur = await self.conn.execute(
+                """
+                SELECT token_address, eligible_first_at, last_name, last_symbol,
+                       called_price_usd, max_price_usd,
+                       hit_2x_at, hit_3x_at, hit_5x_at
+                FROM tokens
+                WHERE eligible_first_at IS NOT NULL
+                  AND eligible_first_at >= ?
+                ORDER BY eligible_first_at DESC
+                LIMIT ?
+                """,
+                (min_first_at, limit),
+            )
         rows = await cur.fetchall()
         await cur.close()
         return rows
+
+    async def count_called_since(self, min_first_at: Optional[int]) -> int:
+        assert self.conn is not None
+        if min_first_at is None:
+            cur = await self.conn.execute(
+                "SELECT COUNT(*) as count FROM tokens WHERE eligible_first_at IS NOT NULL"
+            )
+        else:
+            cur = await self.conn.execute(
+                """
+                SELECT COUNT(*) as count
+                FROM tokens
+                WHERE eligible_first_at IS NOT NULL
+                  AND eligible_first_at >= ?
+                """,
+                (min_first_at,),
+            )
+        row = await cur.fetchone()
+        await cur.close()
+        return row["count"] if row else 0
 
     async def get_called_for_refresh(
         self, limit: int, min_first_at: int
