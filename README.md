@@ -85,7 +85,7 @@ Set `DRY_RUN=true` to log would-alert tokens without posting to Telegram.
 - `/status` - monitoring status, last scan, counters, filters
 - `/eligible` - list currently eligible tokens
 - `/filters` - current filters
-- `/performance [7d|30d|all] [export]` - performance summary, optional CSV export
+- `/performance [7d|30d|all] [export]` - performance summary (default all-time), optional CSV export
 - `/health` - health summary (admin only)
 - `/pause` - pause monitoring (admin only)
 - `/resume` - resume monitoring (admin only)

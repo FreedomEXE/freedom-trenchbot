@@ -61,7 +61,7 @@ HELP_TEXT = (
     "/status - monitoring status and filters\n"
     "/eligible - list currently eligible tokens\n"
     "/stats - list tokens called in the last 24h\n"
-    "/performance - weekly performance summary\n"
+    "/performance - performance summary (all-time)\n"
     "/filters - current filters\n"
     "/health - health summary (admin only)\n"
     "/pause - pause monitoring (admin only)\n"
@@ -818,8 +818,8 @@ async def cmd_performance(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await update.effective_message.reply_text("Bot is starting, try again in a moment.")
         return
     now = utc_now_ts()
-    min_first_at = now - PERFORMANCE_LOOKBACK_DAYS * 86400
-    window_label = f"last {PERFORMANCE_LOOKBACK_DAYS}d"
+    min_first_at = None
+    window_label = "all-time"
     export = False
     if context.args:
         for raw in context.args:
