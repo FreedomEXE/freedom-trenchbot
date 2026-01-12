@@ -19,6 +19,9 @@ from .types import AppContext, PairCandidate
 from .utils import utc_now_ts
 
 POOL_RETENTION_SEC = 6 * 3600
+PERFORMANCE_LOOKBACK_DAYS = 7
+PERFORMANCE_REFRESH_INTERVAL_SEC = 300
+PERFORMANCE_BATCH_SIZE = 50
 
 
 def _pair_sort_key(pair: Dict[str, Any]) -> float:
@@ -81,6 +84,32 @@ def _parse_wallet_analysis(raw: Optional[str]) -> Optional[Dict[str, Any]]:
     return data if isinstance(data, dict) else None
 
 
+def _parse_snapshot(raw: Optional[str]) -> Dict[str, Any]:
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _snapshot_price(raw: Optional[str]) -> Optional[float]:
+    snapshot = _parse_snapshot(raw)
+    return _to_float(snapshot.get("priceUsd"))
+
+
+def _snapshot_mcap(raw: Optional[str]) -> Optional[float]:
+    snapshot = _parse_snapshot(raw)
+    return _to_float(snapshot.get("marketCap"))
+
+
+def _snapshot_pair_address(raw: Optional[str]) -> Optional[str]:
+    snapshot = _parse_snapshot(raw)
+    pair_address = snapshot.get("pairAddress")
+    return str(pair_address) if pair_address else None
+
+
 def _to_float(value: Any) -> Optional[float]:
     try:
         return float(value)
@@ -122,6 +151,8 @@ class Scanner:
         self._analysis_inflight: set[str] = set()
         concurrency = max(1, min(4, app_ctx.config.dex_max_concurrency))
         self._analysis_sem = asyncio.Semaphore(concurrency)
+        self._performance_lock = asyncio.Lock()
+        self._backfill_lock = asyncio.Lock()
 
     async def scan_job(self, context) -> None:
         if self._scan_lock.locked():
@@ -133,6 +164,15 @@ class Scanner:
                 await self.scan_once()
             except Exception:
                 self.ctx.logger.exception("scan_error")
+
+    async def performance_job(self, context) -> None:
+        if self._performance_lock.locked():
+            return
+        async with self._performance_lock:
+            try:
+                await self.refresh_performance_batch()
+            except Exception:
+                self.ctx.logger.exception("performance_refresh_error")
 
     async def scan_once(self) -> None:
         config = self.ctx.config
@@ -290,6 +330,18 @@ class Scanner:
             else:
                 last_ineligible_at = now
 
+            hit_2x_at = token_row["hit_2x_at"]
+            hit_3x_at = token_row["hit_3x_at"]
+            hit_5x_at = token_row["hit_5x_at"]
+            if called_price_usd and price_usd and called_price_usd > 0:
+                multiple = price_usd / called_price_usd
+                if hit_2x_at is None and multiple >= 2.0:
+                    hit_2x_at = now
+                if hit_3x_at is None and multiple >= 3.0:
+                    hit_3x_at = now
+                if hit_5x_at is None and multiple >= 5.0:
+                    hit_5x_at = now
+
             await db.update_token_state(
                 token_address=token_address,
                 last_checked_at=now,
@@ -304,6 +356,9 @@ class Scanner:
                 called_price_usd=called_price_usd,
                 max_price_usd=max_price_usd,
                 max_market_cap=max_market_cap,
+                hit_2x_at=hit_2x_at,
+                hit_3x_at=hit_3x_at,
+                hit_5x_at=hit_5x_at,
             )
             await db.update_pair_checked(
                 primary_candidate.pair_address,
@@ -378,6 +433,101 @@ class Scanner:
                     posted_refs=posted_refs,
                     cached=wallet_analysis is not None,
                 )
+
+    async def backfill_called_prices(self) -> None:
+        if self._backfill_lock.locked():
+            return
+        async with self._backfill_lock:
+            if await self.ctx.db.get_state_bool("performance_backfill_done", False):
+                return
+            self.ctx.logger.info("performance_backfill_start")
+            batch_size = 500
+            while True:
+                rows = await self.ctx.db.get_tokens_missing_called_price(batch_size)
+                if not rows:
+                    break
+                updated = 0
+                for row in rows:
+                    token_address = row["token_address"]
+                    called_price = _snapshot_price(row["eligible_first_metrics"])
+                    if called_price is None:
+                        called_price = _snapshot_price(row["last_seen_metrics"])
+                    if called_price is None:
+                        continue
+                    max_price = row["max_price_usd"] or called_price
+                    last_price = _snapshot_price(row["last_seen_metrics"])
+                    if last_price is not None and last_price > max_price:
+                        max_price = last_price
+                    max_market_cap = row["max_market_cap"]
+                    snapshot_mcap = _snapshot_mcap(row["eligible_first_metrics"])
+                    if max_market_cap is None:
+                        max_market_cap = snapshot_mcap
+                    await self.ctx.db.update_called_prices(
+                        token_address=token_address,
+                        called_price_usd=called_price,
+                        max_price_usd=max_price,
+                        max_market_cap=max_market_cap,
+                    )
+                    updated += 1
+                if updated == 0:
+                    self.ctx.logger.info("performance_backfill_no_progress")
+                    break
+                await asyncio.sleep(0)
+            await self.ctx.db.set_state("performance_backfill_done", "true")
+            self.ctx.logger.info("performance_backfill_done")
+
+    async def refresh_performance_batch(self) -> None:
+        now = utc_now_ts()
+        min_first_at = now - PERFORMANCE_LOOKBACK_DAYS * 86400
+        rows = await self.ctx.db.get_called_for_refresh(PERFORMANCE_BATCH_SIZE, min_first_at)
+        if not rows:
+            return
+        for row in rows:
+            token_address = row["token_address"]
+            pair_address = _snapshot_pair_address(row["last_seen_metrics"])
+            if not pair_address:
+                pair_address = _snapshot_pair_address(row["eligible_first_metrics"])
+            if not pair_address:
+                continue
+            payload = await self.ctx.dex.get_pair(self.ctx.config.chain_id, pair_address)
+            pair = _extract_pair(payload)
+            if not pair:
+                continue
+            metrics = extract_metrics(pair, self.ctx.config.use_fdv_as_mc_proxy)
+            last_seen_metrics = _metrics_snapshot(pair, metrics)
+            price_usd = _to_float(pair.get("priceUsd"))
+            called_price_usd = row["called_price_usd"]
+            max_price_usd = row["max_price_usd"]
+            if price_usd is not None:
+                if max_price_usd is None or price_usd > max_price_usd:
+                    max_price_usd = price_usd
+            max_market_cap = row["max_market_cap"]
+            if metrics.market_cap_value is not None:
+                if max_market_cap is None or metrics.market_cap_value > max_market_cap:
+                    max_market_cap = metrics.market_cap_value
+
+            hit_2x_at = row["hit_2x_at"]
+            hit_3x_at = row["hit_3x_at"]
+            hit_5x_at = row["hit_5x_at"]
+            if called_price_usd and price_usd and called_price_usd > 0:
+                multiple = price_usd / called_price_usd
+                if hit_2x_at is None and multiple >= 2.0:
+                    hit_2x_at = now
+                if hit_3x_at is None and multiple >= 3.0:
+                    hit_3x_at = now
+                if hit_5x_at is None and multiple >= 5.0:
+                    hit_5x_at = now
+
+            await self.ctx.db.update_performance_snapshot(
+                token_address=token_address,
+                last_seen_metrics=last_seen_metrics,
+                last_checked_at=now,
+                max_price_usd=max_price_usd,
+                max_market_cap=max_market_cap,
+                hit_2x_at=hit_2x_at,
+                hit_3x_at=hit_3x_at,
+                hit_5x_at=hit_5x_at,
+            )
 
     def _dedup_candidates(self, candidates: List[PairCandidate], max_count: int) -> List[PairCandidate]:
         dedup: Dict[str, PairCandidate] = {}

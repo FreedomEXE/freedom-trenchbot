@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import statistics
 from typing import Any, Dict, Optional
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -48,11 +49,16 @@ STARTUP_FINAL_FRAME = (
     "Solana Eligibility Scanner • LIVE"
 )
 
+PERFORMANCE_LOOKBACK_DAYS = 7
+PERFORMANCE_SUMMARY_LIMIT = 5000
+PERFORMANCE_TOP_N = 5
+
 HELP_TEXT = (
     "/start - onboarding and status\n"
     "/status - monitoring status and filters\n"
     "/eligible - list currently eligible tokens\n"
     "/stats - list tokens called in the last 24h\n"
+    "/performance - weekly performance summary\n"
     "/filters - current filters\n"
     "/health - health summary (admin only)\n"
     "/pause - pause monitoring (admin only)\n"
@@ -433,6 +439,76 @@ def format_wallet_analysis_update(
     return "\n".join(lines)
 
 
+def _format_multiple(value: Optional[float]) -> str:
+    if value is None:
+        return "n/a"
+    return f"{value:.2f}x"
+
+
+def format_performance_summary(rows, tz_name: str) -> str:
+    header = f"<pre>{WELCOME_HEADER}</pre>"
+    total = len(rows)
+    if total == 0:
+        return f"{header}\nPerformance (last {PERFORMANCE_LOOKBACK_DAYS}d): 0\nNo calls yet."
+
+    tracked = 0
+    hit_2x = 0
+    hit_3x = 0
+    hit_5x = 0
+    multiples: list[float] = []
+    winners: list[tuple[float, Any]] = []
+
+    for row in rows:
+        called_price = row["called_price_usd"]
+        max_price = row["max_price_usd"]
+        if called_price and max_price and called_price > 0:
+            tracked += 1
+            multiple = max_price / called_price
+            multiples.append(multiple)
+            winners.append((multiple, row))
+            if multiple >= 2.0:
+                hit_2x += 1
+            if multiple >= 3.0:
+                hit_3x += 1
+            if multiple >= 5.0:
+                hit_5x += 1
+
+    lines = [
+        header,
+        f"Performance (last {PERFORMANCE_LOOKBACK_DAYS}d)",
+        f"Calls: {total}, tracked: {tracked}",
+    ]
+    if tracked > 0:
+        lines.extend(
+            [
+                f"Hit 2x: {hit_2x} ({_format_ratio(hit_2x / tracked)})",
+                f"Hit 3x: {hit_3x} ({_format_ratio(hit_3x / tracked)})",
+                f"Hit 5x: {hit_5x} ({_format_ratio(hit_5x / tracked)})",
+            ]
+        )
+        median_multiple = statistics.median(multiples)
+        lines.append(f"Median max multiple: {_format_multiple(median_multiple)}")
+
+        winners.sort(key=lambda item: item[0], reverse=True)
+        lines.append(f"Top {min(PERFORMANCE_TOP_N, len(winners))} winners:")
+        for idx, (multiple, row) in enumerate(winners[:PERFORMANCE_TOP_N], start=1):
+            name = escape_html(row["last_name"] or "Unknown")
+            symbol = escape_html(row["last_symbol"] or "?")
+            hit_3x_at = row["hit_3x_at"]
+            called_at = row["eligible_first_at"]
+            time_to_3x = "n/a"
+            if hit_3x_at and called_at:
+                time_to_3x = format_duration(hit_3x_at - called_at)
+            lines.append(
+                f"{idx}. {name} ({symbol}) {multiple:.2f}x | 3x: {time_to_3x}"
+            )
+    else:
+        lines.append("Tracked: n/a (waiting for price updates)")
+
+    lines.append("Note: best-effort based on tracked updates.")
+    return "\n".join(lines)
+
+
 def format_filters(ctx: AppContext) -> str:
     filters = ctx.config.filters
     lines = [
@@ -624,6 +700,23 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await send_called_stats_message(update.effective_message, ctx)
 
 
+async def cmd_performance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    ctx = get_app_ctx(context)
+    if ctx is None:
+        await update.effective_message.reply_text("Bot is starting, try again in a moment.")
+        return
+    now = utc_now_ts()
+    rows = await ctx.db.get_called_for_performance(
+        PERFORMANCE_SUMMARY_LIMIT, now - PERFORMANCE_LOOKBACK_DAYS * 86400
+    )
+    text = format_performance_summary(rows, ctx.config.display_timezone)
+    await update.effective_message.reply_text(
+        text,
+        parse_mode=ParseMode.HTML,
+        disable_web_page_preview=True,
+    )
+
+
 async def cmd_health(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     ctx = get_app_ctx(context)
     if ctx is None:
@@ -787,6 +880,7 @@ def register_handlers(application: Application) -> None:
     application.add_handler(CommandHandler("status", cmd_status))
     application.add_handler(CommandHandler("eligible", cmd_eligible))
     application.add_handler(CommandHandler("stats", cmd_stats))
+    application.add_handler(CommandHandler("performance", cmd_performance))
     application.add_handler(CommandHandler("filters", cmd_filters))
     application.add_handler(CommandHandler("health", cmd_health))
     application.add_handler(CommandHandler("pause", cmd_pause))

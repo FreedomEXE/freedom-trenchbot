@@ -44,7 +44,10 @@ class Database:
                 max_market_cap REAL,
                 wallet_analysis_at INTEGER,
                 wallet_analysis_json TEXT,
-                wallet_analysis_partial INTEGER
+                wallet_analysis_partial INTEGER,
+                hit_2x_at INTEGER,
+                hit_3x_at INTEGER,
+                hit_5x_at INTEGER
             )
             """
         )
@@ -66,6 +69,9 @@ class Database:
         await self._ensure_column("tokens", "wallet_analysis_at", "INTEGER")
         await self._ensure_column("tokens", "wallet_analysis_json", "TEXT")
         await self._ensure_column("tokens", "wallet_analysis_partial", "INTEGER")
+        await self._ensure_column("tokens", "hit_2x_at", "INTEGER")
+        await self._ensure_column("tokens", "hit_3x_at", "INTEGER")
+        await self._ensure_column("tokens", "hit_5x_at", "INTEGER")
         await self._migrate_token_timestamps()
         await self.conn.execute(
             """
@@ -182,6 +188,9 @@ class Database:
         called_price_usd: Optional[float],
         max_price_usd: Optional[float],
         max_market_cap: Optional[float],
+        hit_2x_at: Optional[int],
+        hit_3x_at: Optional[int],
+        hit_5x_at: Optional[int],
     ) -> None:
         assert self.conn is not None
         await self.conn.execute(
@@ -198,7 +207,10 @@ class Database:
                 last_symbol = ?,
                 called_price_usd = ?,
                 max_price_usd = ?,
-                max_market_cap = ?
+                max_market_cap = ?,
+                hit_2x_at = ?,
+                hit_3x_at = ?,
+                hit_5x_at = ?
             WHERE token_address = ?
             """,
             (
@@ -214,6 +226,9 @@ class Database:
                 called_price_usd,
                 max_price_usd,
                 max_market_cap,
+                hit_2x_at,
+                hit_3x_at,
+                hit_5x_at,
                 token_address,
             ),
         )
@@ -236,6 +251,122 @@ class Database:
             WHERE token_address = ?
             """,
             (analysis_at, analysis_json, 1 if partial else 0, token_address),
+        )
+        await self.conn.commit()
+
+    async def get_tokens_missing_called_price(self, limit: int) -> List[aiosqlite.Row]:
+        assert self.conn is not None
+        cur = await self.conn.execute(
+            """
+            SELECT token_address, eligible_first_metrics, last_seen_metrics,
+                   called_price_usd, max_price_usd, max_market_cap
+            FROM tokens
+            WHERE eligible_first_at IS NOT NULL
+              AND called_price_usd IS NULL
+            LIMIT ?
+            """,
+            (limit,),
+        )
+        rows = await cur.fetchall()
+        await cur.close()
+        return rows
+
+    async def update_called_prices(
+        self,
+        token_address: str,
+        called_price_usd: Optional[float],
+        max_price_usd: Optional[float],
+        max_market_cap: Optional[float],
+    ) -> None:
+        assert self.conn is not None
+        await self.conn.execute(
+            """
+            UPDATE tokens
+            SET called_price_usd = ?,
+                max_price_usd = ?,
+                max_market_cap = ?
+            WHERE token_address = ?
+            """,
+            (called_price_usd, max_price_usd, max_market_cap, token_address),
+        )
+        await self.conn.commit()
+
+    async def get_called_for_performance(
+        self, limit: int, min_first_at: int
+    ) -> List[aiosqlite.Row]:
+        assert self.conn is not None
+        cur = await self.conn.execute(
+            """
+            SELECT token_address, eligible_first_at, last_name, last_symbol,
+                   called_price_usd, max_price_usd,
+                   hit_2x_at, hit_3x_at, hit_5x_at
+            FROM tokens
+            WHERE eligible_first_at IS NOT NULL
+              AND eligible_first_at >= ?
+            ORDER BY eligible_first_at DESC
+            LIMIT ?
+            """,
+            (min_first_at, limit),
+        )
+        rows = await cur.fetchall()
+        await cur.close()
+        return rows
+
+    async def get_called_for_refresh(
+        self, limit: int, min_first_at: int
+    ) -> List[aiosqlite.Row]:
+        assert self.conn is not None
+        cur = await self.conn.execute(
+            """
+            SELECT token_address, eligible_first_metrics, last_seen_metrics,
+                   called_price_usd, max_price_usd, max_market_cap,
+                   hit_2x_at, hit_3x_at, hit_5x_at
+            FROM tokens
+            WHERE eligible_first_at IS NOT NULL
+              AND eligible_first_at >= ?
+            ORDER BY COALESCE(last_checked_at, 0) ASC
+            LIMIT ?
+            """,
+            (min_first_at, limit),
+        )
+        rows = await cur.fetchall()
+        await cur.close()
+        return rows
+
+    async def update_performance_snapshot(
+        self,
+        token_address: str,
+        last_seen_metrics: Optional[str],
+        last_checked_at: int,
+        max_price_usd: Optional[float],
+        max_market_cap: Optional[float],
+        hit_2x_at: Optional[int],
+        hit_3x_at: Optional[int],
+        hit_5x_at: Optional[int],
+    ) -> None:
+        assert self.conn is not None
+        await self.conn.execute(
+            """
+            UPDATE tokens
+            SET last_seen_metrics = ?,
+                last_checked_at = ?,
+                max_price_usd = ?,
+                max_market_cap = ?,
+                hit_2x_at = ?,
+                hit_3x_at = ?,
+                hit_5x_at = ?
+            WHERE token_address = ?
+            """,
+            (
+                last_seen_metrics,
+                last_checked_at,
+                max_price_usd,
+                max_market_cap,
+                hit_2x_at,
+                hit_3x_at,
+                hit_5x_at,
+                token_address,
+            ),
         )
         await self.conn.commit()
 

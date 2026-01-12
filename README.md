@@ -83,6 +83,7 @@ Set `DRY_RUN=true` to log would-alert tokens without posting to Telegram.
 - `/status` - monitoring status, last scan, counters, filters
 - `/eligible` - list currently eligible tokens
 - `/filters` - current filters
+- `/performance` - 7 day performance summary
 - `/health` - health summary (admin only)
 - `/pause` - pause monitoring (admin only)
 - `/resume` - resume monitoring (admin only)
@@ -99,4 +100,5 @@ SVG logo: `assets/freedom-trench-bot.svg`
 - If `marketCap` is missing, FDV is only used when `USE_FDV_AS_MC_PROXY=true` and is labeled as a proxy.
 - Alerts only fire once per token; check `/eligible` to see the currently eligible list.
 - Missing change or volume fields fail the filter by design.
+- Performance tracking is best-effort; inactive tokens may update less frequently.
 - No trading, wallet creation, or automation is included.

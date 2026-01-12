@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import signal
 
@@ -13,7 +14,7 @@ from .db import Database
 from .dexscreener import DexscreenerClient
 from .discovery import DiscoveryEngine
 from .logger import setup_logging
-from .scheduler import Scanner
+from .scheduler import Scanner, PERFORMANCE_REFRESH_INTERVAL_SEC
 from .types import AppContext
 from .wallet_analysis import WalletAnalyzer
 
@@ -62,6 +63,14 @@ def main() -> None:
             name="scanner",
         )
         application.bot_data["scan_job"] = scan_job
+        perf_job = application.job_queue.run_repeating(
+            scanner.performance_job,
+            interval=PERFORMANCE_REFRESH_INTERVAL_SEC,
+            first=15,
+            name="performance_tracker",
+        )
+        application.bot_data["perf_job"] = perf_job
+        asyncio.create_task(scanner.backfill_called_prices())
         logger.info(
             "bot_ready",
             extra={
@@ -80,6 +89,9 @@ def main() -> None:
         scan_job = application.bot_data.get("scan_job")
         if scan_job:
             scan_job.schedule_removal()
+        perf_job = application.bot_data.get("perf_job")
+        if perf_job:
+            perf_job.schedule_removal()
         app_ctx = application.bot_data.get("app_ctx")
         if app_ctx:
             await app_ctx.session.close()
