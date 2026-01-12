@@ -12,7 +12,6 @@ if TYPE_CHECKING:
     from .dexscreener import DexscreenerClient
     from .discovery import DiscoveryEngine
     from .wallet_analysis import WalletAnalyzer
-    from .wallet_analysis import IntentAnalyzer
 
 
 @dataclass
@@ -60,4 +59,3 @@ class AppContext:
     dex: "DexscreenerClient"
     discovery: "DiscoveryEngine"
     wallet_analyzer: Optional["WalletAnalyzer"] = None
-    intent_analyzer: Optional["IntentAnalyzer"] = None

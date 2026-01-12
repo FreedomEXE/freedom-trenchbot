@@ -38,7 +38,7 @@ This requires a Helius API key:
 
 Older pools are best-effort due to pagination caps; the alert will note when history is partial.
 
-Intent scoring uses the same Helius data to add a one-line "Intent" label once available. It is enabled automatically when `HELIUS_API_KEY` is set.
+Flow scoring uses Dexscreener txns + volume to add a one-line "Flow" label and does not require Helius.
 
 ## Setup
 1) Use Python 3.12.x (see `.python-version`).
@@ -73,6 +73,7 @@ Set `DRY_RUN=true` to log would-alert tokens without posting to Telegram.
 - `ALLOWED_THREAD_IDS` (restrict alerts to specific thread IDs in a group)
 - `CALLED_LIST_LIMIT` (max items in `/stats`)
 - `ALERT_TAGLINE` (custom line shown in alert messages)
+- `FLOW_SCORE_MIN` (threshold for flow-filtered performance simulations)
 - `WALLET_ANALYSIS_ENABLED` (enable first-buyer analysis)
 - `WALLET_ANALYSIS_LABEL` (custom label shown in wallet analysis section)
 - `WALLET_ANALYSIS_SAMPLE` (number of first buyers to sample)
@@ -93,7 +94,7 @@ Set `DRY_RUN=true` to log would-alert tokens without posting to Telegram.
 - `/help` - quick help
 
 ## Alert format
-Alerts fire only once when a token is first discovered eligible. The message includes token name/symbol, chain, CA, market cap (or FDV proxy), first seen, and links. When intent analysis is available, a one-line "Intent" score is appended. When wallet analysis is enabled, a "Top Wallet Call" section is appended once the analysis completes.
+Alerts fire only once when a token is first discovered eligible. The message includes token name/symbol, chain, CA, market cap (or FDV proxy), first seen, and links. A one-line "Flow" score is appended. When wallet analysis is enabled, a "Top Wallet Call" section is appended once the analysis completes.
 
 ## Brand kit
 SVG logo: `assets/freedom-trench-bot.svg`

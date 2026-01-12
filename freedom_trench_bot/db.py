@@ -330,6 +330,7 @@ class Database:
                 """
                 SELECT token_address, eligible_first_at, last_name, last_symbol,
                        called_price_usd, max_price_usd,
+                       last_seen_metrics, eligible_first_metrics,
                        hit_2x_at, hit_3x_at, hit_5x_at
                 FROM tokens
                 WHERE eligible_first_at IS NOT NULL
@@ -343,6 +344,7 @@ class Database:
                 """
                 SELECT token_address, eligible_first_at, last_name, last_symbol,
                        called_price_usd, max_price_usd,
+                       last_seen_metrics, eligible_first_metrics,
                        hit_2x_at, hit_3x_at, hit_5x_at
                 FROM tokens
                 WHERE eligible_first_at IS NOT NULL

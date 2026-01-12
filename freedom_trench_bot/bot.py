@@ -17,6 +17,7 @@ from telegram.ext import (
     ContextTypes,
 )
 
+from .flow import flow_from_snapshot
 from .types import AppContext, FilterMetrics
 from .utils import (
     escape_html,
@@ -156,17 +157,13 @@ def _format_ratio(value: Optional[float]) -> str:
     return f"{value * 100:.1f}%"
 
 
-def format_intent_line(intent: Dict[str, Any]) -> Optional[str]:
-    if not intent:
+def format_flow_line(flow: Dict[str, Any]) -> Optional[str]:
+    if not flow:
         return None
-    score = intent.get("score")
-    max_score = intent.get("max_score") or intent.get("maxScore")
-    label = intent.get("label")
-    if label is None:
-        return None
-    if str(label) == "Unavailable":
-        return "Intent: Unavailable"
-    if score is None or max_score is None:
+    score = flow.get("score")
+    max_score = flow.get("max_score") or flow.get("maxScore")
+    label = flow.get("label")
+    if score is None or max_score is None or label is None:
         return None
     try:
         score_val = int(score)
@@ -174,7 +171,7 @@ def format_intent_line(intent: Dict[str, Any]) -> Optional[str]:
     except (TypeError, ValueError):
         return None
     label_text = escape_html(str(label))
-    return f"Intent: {label_text} ({score_val}/{max_val})"
+    return f"Flow: {label_text} ({score_val}/{max_val})"
 
 
 def format_wallet_analysis_block(
@@ -376,7 +373,7 @@ def format_alert_message(
     tagline: str,
     wallet_analysis: Optional[Dict[str, Any]] = None,
     wallet_label: str = "",
-    intent_data: Optional[Dict[str, Any]] = None,
+    flow_data: Optional[Dict[str, Any]] = None,
 ) -> str:
     base = pair.get("baseToken") or {}
     quote = pair.get("quoteToken") or {}
@@ -404,10 +401,10 @@ def format_alert_message(
         header_block,
         escape_html(tagline),
     ]
-    if intent_data:
-        intent_line = format_intent_line(intent_data)
-        if intent_line:
-            lines.append(intent_line)
+    if flow_data:
+        flow_line = format_flow_line(flow_data)
+        if flow_line:
+            lines.append(flow_line)
     lines.extend(
         [
             f"Token: {name} ({symbol})",
@@ -472,57 +469,75 @@ def format_wallet_analysis_update(
     return "\n".join(lines)
 
 
-def format_intent_update(
-    pair: dict,
-    token_address: str,
-    intent: Dict[str, Any],
-    tz_name: str,
-    chain_id: str,
-) -> str:
-    base = pair.get("baseToken") or {}
-    quote = pair.get("quoteToken") or {}
-    token_address_lc = token_address.lower()
-    token_obj = base
-    if isinstance(base, dict) and base.get("address") and base["address"].lower() == token_address_lc:
-        token_obj = base
-    elif (
-        isinstance(quote, dict)
-        and quote.get("address")
-        and quote["address"].lower() == token_address_lc
-    ):
-        token_obj = quote
-    name = escape_html(token_obj.get("name") or "Unknown")
-    symbol = escape_html(token_obj.get("symbol") or "?")
-
-    header_block = f"<pre>{WELCOME_HEADER}</pre>"
-    ca_block = f"<pre>{escape_html(token_address)}</pre>"
-    lines = [
-        header_block,
-        "Intent update",
-        f"Token: {name} ({symbol})",
-        "CA:",
-        ca_block,
-    ]
-    intent_line = format_intent_line(intent)
-    if intent_line:
-        lines.append(intent_line)
-    lines.extend(
-        [
-            f"Dexscreener: <a href=\"{build_dex_url(pair, chain_id)}\">link</a>",
-            f"Solscan: <a href=\"https://solscan.io/token/{token_address}\">link</a>",
-        ]
-    )
-    return "\n".join(lines)
-
-
 def _format_multiple(value: Optional[float]) -> str:
     if value is None:
         return "n/a"
     return f"{value:.2f}x"
 
 
+def _snapshot_price(raw: Optional[str]) -> Optional[float]:
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    return _to_float(data.get("priceUsd"))
+
+
+def _flow_from_row(row) -> Optional[Dict[str, Any]]:
+    flow = flow_from_snapshot(row["eligible_first_metrics"])
+    if flow is None:
+        flow = flow_from_snapshot(row["last_seen_metrics"])
+    return flow
+
+
+def _flow_score_from_row(row) -> Optional[int]:
+    flow = _flow_from_row(row)
+    if not flow:
+        return None
+    score = flow.get("score")
+    try:
+        return int(score)
+    except (TypeError, ValueError):
+        return None
+
+
+def _simulate_ladder(row) -> Optional[float]:
+    called_price = row["called_price_usd"]
+    if not called_price or called_price <= 0:
+        return None
+    max_price = row["max_price_usd"]
+    last_price = _snapshot_price(row["last_seen_metrics"])
+
+    peak_multiple = None
+    if max_price and max_price > 0:
+        peak_multiple = max_price / called_price
+    last_multiple = None
+    if last_price and last_price > 0:
+        last_multiple = last_price / called_price
+    if peak_multiple is None and last_multiple is None:
+        return None
+
+    peak = peak_multiple or last_multiple or 0.0
+    exit_multiple = last_multiple if last_multiple is not None else peak
+
+    proceeds = 0.0
+    remaining = 1.0
+    if peak >= 1.2:
+        proceeds += 0.5 * 1.2
+        remaining -= 0.5
+    if peak >= 2.0:
+        proceeds += 0.25 * 2.0
+        remaining -= 0.25
+    proceeds += remaining * exit_multiple
+    return proceeds - 1.0
+
+
 def format_performance_summary(
-    rows, tz_name: str, window_label: str, total_calls: int, limit: int
+    rows, tz_name: str, window_label: str, total_calls: int, limit: int, flow_score_min: int
 ) -> str:
     header = f"<pre>{WELCOME_HEADER}</pre>"
     shown = len(rows)
@@ -535,6 +550,8 @@ def format_performance_summary(
     hit_5x = 0
     multiples: list[float] = []
     winners: list[tuple[float, Any]] = []
+    sim_all: list[float] = []
+    sim_flow: list[float] = []
 
     for row in rows:
         called_price = row["called_price_usd"]
@@ -550,6 +567,12 @@ def format_performance_summary(
                 hit_3x += 1
             if multiple >= 5.0:
                 hit_5x += 1
+        sim_value = _simulate_ladder(row)
+        if sim_value is not None:
+            sim_all.append(sim_value)
+            flow_score = _flow_score_from_row(row)
+            if flow_score is not None and flow_score >= flow_score_min:
+                sim_flow.append(sim_value)
 
     lines = [header, f"Performance ({window_label})", f"Calls: {total_calls}, tracked: {tracked}"]
     if total_calls > shown:
@@ -581,6 +604,18 @@ def format_performance_summary(
     else:
         lines.append("Tracked: n/a (waiting for price updates)")
 
+    if sim_all:
+        avg_return = statistics.fmean(sim_all) * 100
+        lines.append(
+            "Sim (equal-weight, 50%@1.2x, 25%@2x, 25%@exit): "
+            f"{format_pct(avg_return)} avg over {len(sim_all)} trades"
+        )
+        if sim_flow:
+            avg_flow = statistics.fmean(sim_flow) * 100
+            lines.append(
+                f"Sim Flow >= {flow_score_min}: {format_pct(avg_flow)} avg over {len(sim_flow)} trades"
+            )
+
     lines.append("Note: best-effort based on tracked updates.")
     return "\n".join(lines)
 
@@ -597,6 +632,8 @@ def build_performance_csv(rows, tz_name: str) -> bytes:
             "called_price_usd",
             "max_price_usd",
             "max_multiple",
+            "flow_score",
+            "flow_label",
             "hit_2x_at",
             "hit_3x_at",
             "hit_5x_at",
@@ -608,6 +645,9 @@ def build_performance_csv(rows, tz_name: str) -> bytes:
         multiple = None
         if called_price and max_price and called_price > 0:
             multiple = max_price / called_price
+        flow = _flow_from_row(row) or {}
+        flow_score = flow.get("score")
+        flow_label = flow.get("label")
         writer.writerow(
             [
                 row["token_address"],
@@ -617,6 +657,8 @@ def build_performance_csv(rows, tz_name: str) -> bytes:
                 called_price if called_price is not None else "",
                 max_price if max_price is not None else "",
                 f"{multiple:.2f}" if multiple is not None else "",
+                flow_score if flow_score is not None else "",
+                flow_label if flow_label is not None else "",
                 format_ts(row["hit_2x_at"], tz_name),
                 format_ts(row["hit_3x_at"], tz_name),
                 format_ts(row["hit_5x_at"], tz_name),
@@ -856,6 +898,7 @@ async def cmd_performance(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         window_label,
         total_calls,
         limit,
+        ctx.config.flow_score_min,
     )
     await update.effective_message.reply_text(
         text,
