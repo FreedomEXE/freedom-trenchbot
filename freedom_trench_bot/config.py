@@ -112,7 +112,7 @@ def load_config() -> Config:
     fresh_wallet_max_age_days = int(os.getenv("FRESH_WALLET_MAX_AGE_DAYS", "7"))
     fresh_wallet_max_tx = int(os.getenv("FRESH_WALLET_MAX_TX", "20"))
     helius_api_key = os.getenv("HELIUS_API_KEY", "").strip()
-    flow_score_min = int(os.getenv("FLOW_SCORE_MIN", "70"))
+    flow_score_min = int(os.getenv("FLOW_SCORE_MIN", "75"))
 
     dex_max_rps = int(os.getenv("DEX_MAX_RPS", "5"))
     dex_max_concurrency = int(os.getenv("DEX_MAX_CONCURRENCY", "2"))
