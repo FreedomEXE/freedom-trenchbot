@@ -52,23 +52,41 @@ def compute_flow(pair: Dict[str, Any]) -> Dict[str, Any]:
     buys_5m_raw = _get_txn_count(pair, "m5", "buys")
     sells_5m_raw = _get_txn_count(pair, "m5", "sells")
     volume_5m_raw = _get_volume_5m(pair)
+    buys_1h_raw = _get_txn_count(pair, "h1", "buys")
+    sells_1h_raw = _get_txn_count(pair, "h1", "sells")
+    volume_1h_raw = _get_volume_1h(pair)
 
     partial = False
-    if buys_5m_raw is None or sells_5m_raw is None or volume_5m_raw is None:
+    if (
+        buys_5m_raw is None
+        or sells_5m_raw is None
+        or volume_5m_raw is None
+        or buys_1h_raw is None
+        or sells_1h_raw is None
+        or volume_1h_raw is None
+    ):
         partial = True
 
     has_buys_5m = buys_5m_raw is not None
     has_sells_5m = sells_5m_raw is not None
     has_volume_5m = volume_5m_raw is not None
+    has_buys_1h = buys_1h_raw is not None
+    has_sells_1h = sells_1h_raw is not None
+    has_volume_1h = volume_1h_raw is not None
 
     buys_5m = buys_5m_raw or 0
     sells_5m = sells_5m_raw or 0
     volume_5m = volume_5m_raw or 0.0
+    buys_1h = buys_1h_raw or 0
+    sells_1h = sells_1h_raw or 0
+    volume_1h = volume_1h_raw or 0.0
 
     buy_pressure = buys_5m / max(1, sells_5m)
     avg_buy = volume_5m / max(1, buys_5m)
+    buy_pressure_1h = buys_1h / max(1, sells_1h)
+    avg_buy_1h = volume_1h / max(1, buys_1h)
 
-    gate_passed = (
+    gate_5m = (
         has_buys_5m
         and has_sells_5m
         and has_volume_5m
@@ -76,9 +94,17 @@ def compute_flow(pair: Dict[str, Any]) -> Dict[str, Any]:
         and volume_5m >= 10000
         and buys_5m > sells_5m
     )
+    gate_1h = (
+        has_buys_1h
+        and has_sells_1h
+        and has_volume_1h
+        and buys_1h >= 40
+        and volume_1h >= 50000
+        and buys_1h > sells_1h
+    )
 
     score = 0
-    if gate_passed:
+    if gate_5m:
         if buys_5m >= 8:
             score += 30
         if buys_5m >= 12:
@@ -91,6 +117,18 @@ def compute_flow(pair: Dict[str, Any]) -> Dict[str, Any]:
             score += 20
         elif avg_buy < 150 or avg_buy > 4000:
             score -= 20
+    if gate_1h:
+        score += 30
+        if buys_1h >= 80:
+            score += 15
+        if buy_pressure_1h >= 1.4:
+            score += 15
+        if buy_pressure_1h >= 1.8:
+            score += 10
+        if 300 <= avg_buy_1h <= 2500:
+            score += 15
+        elif avg_buy_1h < 150 or avg_buy_1h > 5000:
+            score -= 15
 
     if score < 0:
         score = 0
@@ -113,7 +151,13 @@ def compute_flow(pair: Dict[str, Any]) -> Dict[str, Any]:
         "volume_5m": volume_5m,
         "buy_pressure": buy_pressure,
         "avg_buy": avg_buy,
-        "gate_passed": gate_passed,
+        "buys_1h": buys_1h,
+        "sells_1h": sells_1h,
+        "volume_1h": volume_1h,
+        "buy_pressure_1h": buy_pressure_1h,
+        "avg_buy_1h": avg_buy_1h,
+        "gate_5m": gate_5m,
+        "gate_1h": gate_1h,
         "partial": partial,
     }
 

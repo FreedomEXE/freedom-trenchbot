@@ -38,7 +38,7 @@ This requires a Helius API key:
 
 Older pools are best-effort due to pagination caps; the alert will note when history is partial.
 
-Flow scoring uses Dexscreener 5m txns + volume to add a one-line "Flow" label and does not require Helius.
+Flow scoring uses Dexscreener 5m + 1h txns/volume to add a one-line "Flow" label and does not require Helius.
 
 ## Setup
 1) Use Python 3.12.x (see `.python-version`).

@@ -24,6 +24,7 @@ from .utils import (
     format_duration,
     format_pct,
     format_ts,
+    format_ts_bold_if_past,
     format_usd,
     parse_duration,
     utc_now_ts,
@@ -254,7 +255,7 @@ def format_eligible_list(
         flow_line = format_flow_line(_flow_from_row(row) or {})
         if flow_line:
             lines.append(flow_line)
-        lines.append(f"Found: {format_ts(found_ts, tz_name)}")
+        lines.append(f"Found: {format_ts_bold_if_past(found_ts, tz_name)}")
         lines.append(f"MCap now: {_format_mcap_from_snapshot(current_snapshot)}")
         lines.append(f"MCap found: {_format_mcap_from_snapshot(found_snapshot)}")
         lines.append("")
@@ -296,7 +297,7 @@ def format_called_stats(rows, tz_name: str, retention_sec: int, limit: int) -> s
 
         lines.append(f"{idx}. {name} ({symbol})")
         lines.append(f"CA: <code>{escape_html(token_address)}</code>")
-        lines.append(f"Called: {format_ts(called_ts, tz_name)}")
+        lines.append(f"Called: {format_ts_bold_if_past(called_ts, tz_name)}")
         lines.append(f"MCap called: {_format_mcap_from_snapshot(found_snapshot)}")
         lines.append(f"MCap now: {_format_mcap_from_snapshot(current_snapshot)}")
         lines.append(f"ATH MCap (since call): {format_usd(ath_mcap)}")
@@ -456,9 +457,9 @@ def format_alert_message(
     if wallet_analysis:
         label = wallet_label or "Top Wallet Call"
         lines.extend(format_wallet_analysis_block(wallet_analysis, label, tz_name))
-    lines.extend(
+        lines.extend(
         [
-            f"First seen: {format_ts(first_seen_ts, tz_name)}",
+            f"First seen: {format_ts_bold_if_past(first_seen_ts, tz_name)}",
             f"Dexscreener: <a href=\"{build_dex_url(pair, chain_id)}\">link</a>",
             f"Solscan: <a href=\"https://solscan.io/token/{token_address}\">link</a>",
         ]

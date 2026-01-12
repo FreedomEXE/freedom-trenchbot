@@ -101,3 +101,22 @@ def format_ts(ts: Optional[int], tz_name: str) -> str:
         except Exception:
             pass
     return dt.strftime("%Y-%m-%d %H:%M:%S %Z")
+
+
+def format_ts_bold_if_past(ts: Optional[int], tz_name: str, now_ts: Optional[int] = None) -> str:
+    formatted = format_ts(ts, tz_name)
+    if not ts:
+        return formatted
+    now_value = now_ts if now_ts is not None else int(time.time())
+    dt = datetime.fromtimestamp(ts, tz=timezone.utc)
+    now_dt = datetime.fromtimestamp(now_value, tz=timezone.utc)
+    if tz_name and ZoneInfo is not None:
+        try:
+            zone = ZoneInfo(tz_name)
+            dt = dt.astimezone(zone)
+            now_dt = now_dt.astimezone(zone)
+        except Exception:
+            pass
+    if dt.date() < now_dt.date():
+        return f"<b>{formatted}</b>"
+    return formatted
