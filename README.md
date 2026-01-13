@@ -27,16 +27,12 @@ Discovery runs in hybrid mode (`DISCOVERY_MODE=hybrid`) for best recall:
 This avoids HTML scraping and stays within rate limits. Tune pool size, hot recheck count, and scan interval in `.env`.
 Set `MARKET_BASE_TOKENS` to add additional base tokens to sample.
 
-## Wallet analysis (optional)
-Wallet analysis enriches alerts with a "first buyers" snapshot (default 20 buyers), fresh wallet ratio, and average SOL balance.
-It runs asynchronously after an alert is posted and edits the original alert in place (with a follow-up message if edits fail).
+## Holder count (optional)
+Holder count uses the Helius RPC to estimate token holders at alert time and adds a small boost to Flow scoring.
+It also displays a "Holders" line in alerts and `/eligible` when available.
 
-This requires a Helius API key:
-- `WALLET_ANALYSIS_ENABLED=true`
-- `WALLET_ANALYSIS_PROVIDER=helius`
+Requires a Helius API key:
 - `HELIUS_API_KEY=...`
-
-Older pools are best-effort due to pagination caps; the alert will note when history is partial.
 
 Flow scoring uses Dexscreener 5m + 1h txns/volume to add a one-line "Flow" label. If a Helius key is configured, it also adds a holder-count boost.
 
@@ -75,12 +71,6 @@ Set `DRY_RUN=true` to log would-alert tokens without posting to Telegram.
 - `ALERT_TAGLINE` (custom line shown in alert messages)
 - `FLOW_SCORE_MIN` (threshold for flow-filtered performance simulations; default 60, effective cap 60)
 - `HOLDER_COUNT_ENABLED` and `HOLDER_COUNT_MIN` (optional holder-count boost to Flow; requires `HELIUS_API_KEY`)
-- `WALLET_ANALYSIS_ENABLED` (enable first-buyer analysis)
-- `WALLET_ANALYSIS_LABEL` (custom label shown in wallet analysis section)
-- `WALLET_ANALYSIS_SAMPLE` (number of first buyers to sample)
-- `WALLET_ANALYSIS_MAX_PAGES` (pagination cap for older pools)
-- `WALLET_ANALYSIS_TTL_HOURS` (cache analysis per token)
-- `FRESH_WALLET_MAX_AGE_DAYS`, `FRESH_WALLET_MAX_TX` (fresh wallet definition)
 
 ## Commands
 - `/start` - onboarding and status
@@ -95,7 +85,7 @@ Set `DRY_RUN=true` to log would-alert tokens without posting to Telegram.
 - `/help` - quick help
 
 ## Alert format
-Alerts fire only once when a token is first discovered eligible. The message includes token name/symbol, chain, CA, market cap (or FDV proxy), first seen, and links. A one-line "Flow" score is appended. When wallet analysis is enabled, a "Top Wallet Call" section is appended once the analysis completes.
+Alerts fire only once when a token is first discovered eligible. The message includes token name/symbol, chain, CA, market cap (or FDV proxy), first seen, holder count (if available), and links. A one-line "Flow" score is appended.
 
 ## Brand kit
 SVG logo: `assets/freedom-trench-bot.svg`

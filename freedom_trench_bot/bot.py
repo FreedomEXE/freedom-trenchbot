@@ -562,8 +562,15 @@ def _snapshot_price(raw: Optional[str]) -> Optional[float]:
 
 def _flow_from_row(row) -> Optional[Dict[str, Any]]:
     flow = flow_from_snapshot(row["eligible_first_metrics"])
+    fallback = flow_from_snapshot(row["last_seen_metrics"])
     if flow is None:
-        flow = flow_from_snapshot(row["last_seen_metrics"])
+        return fallback
+    if fallback and flow.get("holders") is None and fallback.get("holders") is not None:
+        merged = dict(flow)
+        merged["holders"] = fallback.get("holders")
+        if "holder_boost" in fallback:
+            merged["holder_boost"] = fallback.get("holder_boost")
+        return merged
     return flow
 
 
@@ -1084,14 +1091,6 @@ async def cmd_health(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     scan_overlap = await ctx.db.get_state_int("metrics_scan_overlap", 0)
     api_requests = await ctx.db.get_state_int("metrics_api_requests", 0)
     rate_limited = await ctx.db.get_state_int("metrics_rate_limited_count", 0)
-    wallet_runs = await ctx.db.get_state_int("metrics_wallet_runs", 0)
-    wallet_success = await ctx.db.get_state_int("metrics_wallet_success", 0)
-    wallet_fail = await ctx.db.get_state_int("metrics_wallet_fail", 0)
-    wallet_no_data = await ctx.db.get_state_int("metrics_wallet_no_data", 0)
-    wallet_api_requests = await ctx.db.get_state_int("metrics_wallet_api_requests", 0)
-    wallet_rate_limited = await ctx.db.get_state_int("metrics_wallet_rate_limited_count", 0)
-    wallet_last_at = await ctx.db.get_state_int("wallet_analysis_last_at", 0)
-    wallet_last_token = await ctx.db.get_state("wallet_analysis_last_token") or "n/a"
 
     lines = [
         "HEALTH",
@@ -1101,11 +1100,7 @@ async def cmd_health(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         f"Scan overlap warnings: {scan_overlap}",
         f"API requests: {api_requests}",
         f"Rate limited: {rate_limited}",
-        f"Wallet analysis: {'on' if ctx.config.wallet_analysis_enabled else 'off'} ({ctx.config.wallet_analysis_provider})",
-        f"Wallet runs: {wallet_runs}, success: {wallet_success}, fail: {wallet_fail}, no_data: {wallet_no_data}",
-        f"Wallet API: requests {wallet_api_requests}, rate_limited {wallet_rate_limited}",
-        f"Wallet last: {format_ts(wallet_last_at, ctx.config.display_timezone)}",
-        f"Wallet last token: {wallet_last_token}",
+        f"Holder count: {'on' if ctx.config.holder_count_enabled else 'off'} (min {ctx.config.holder_count_min})",
     ]
     await update.effective_message.reply_text("\n".join(lines))
 

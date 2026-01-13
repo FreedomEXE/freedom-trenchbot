@@ -16,7 +16,7 @@ from .discovery import DiscoveryEngine
 from .logger import setup_logging
 from .scheduler import Scanner, PERFORMANCE_REFRESH_INTERVAL_SEC
 from .types import AppContext
-from .wallet_analysis import HeliusClient, WalletAnalyzer
+from .wallet_analysis import HeliusClient
 from .utils import effective_flow_score_min
 
 
@@ -44,13 +44,6 @@ def main() -> None:
         helius_client = None
         if config.helius_api_key:
             helius_client = HeliusClient(session, config, logger, db=db)
-        if config.wallet_analysis_enabled and config.wallet_analysis_provider == "helius":
-            if not config.helius_api_key:
-                logger.warning("wallet_analysis_disabled_missing_api_key")
-            else:
-                wallet_analyzer = WalletAnalyzer(
-                    session, config, logger, db=db, client=helius_client
-                )
         app_ctx = AppContext(
             config=config,
             logger=logger,
@@ -90,8 +83,6 @@ def main() -> None:
                 "allowed_threads": len(config.allowed_thread_ids),
                 "db_path": config.sqlite_path,
                 "dry_run": config.dry_run,
-                "wallet_analysis": config.wallet_analysis_enabled,
-                "wallet_provider": config.wallet_analysis_provider,
                 "holder_count_enabled": config.holder_count_enabled,
                 "holder_count_min": config.holder_count_min,
                 "flow_score_min": config.flow_score_min,

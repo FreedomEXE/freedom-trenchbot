@@ -105,14 +105,14 @@ def load_config() -> Config:
     called_list_limit = int(os.getenv("CALLED_LIST_LIMIT", "50"))
     alert_tagline = os.getenv("ALERT_TAGLINE", "Trenches Call").strip()
 
-    wallet_analysis_enabled = parse_bool(os.getenv("WALLET_ANALYSIS_ENABLED", "false"), False)
-    wallet_analysis_provider = os.getenv("WALLET_ANALYSIS_PROVIDER", "helius").strip().lower()
-    wallet_analysis_sample = int(os.getenv("WALLET_ANALYSIS_SAMPLE", "20"))
-    wallet_analysis_label = os.getenv("WALLET_ANALYSIS_LABEL", "Top Wallet Call").strip()
-    wallet_analysis_max_pages = int(os.getenv("WALLET_ANALYSIS_MAX_PAGES", "10"))
-    wallet_analysis_ttl_sec = int(os.getenv("WALLET_ANALYSIS_TTL_HOURS", "24")) * 3600
-    fresh_wallet_max_age_days = int(os.getenv("FRESH_WALLET_MAX_AGE_DAYS", "7"))
-    fresh_wallet_max_tx = int(os.getenv("FRESH_WALLET_MAX_TX", "20"))
+    wallet_analysis_enabled = False
+    wallet_analysis_provider = "helius"
+    wallet_analysis_sample = 0
+    wallet_analysis_label = ""
+    wallet_analysis_max_pages = 0
+    wallet_analysis_ttl_sec = 0
+    fresh_wallet_max_age_days = 0
+    fresh_wallet_max_tx = 0
     helius_api_key = os.getenv("HELIUS_API_KEY", "").strip()
     holder_count_enabled = parse_bool(os.getenv("HOLDER_COUNT_ENABLED", "true"), True)
     holder_count_min = int(os.getenv("HOLDER_COUNT_MIN", "100"))

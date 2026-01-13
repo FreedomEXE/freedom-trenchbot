@@ -7,12 +7,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from telegram.constants import ParseMode
 
-from .bot import (
-    build_alert_keyboard,
-    format_alert_message,
-    build_trigger_reason,
-    format_wallet_analysis_update,
-)
+from .bot import build_alert_keyboard, format_alert_message, build_trigger_reason
 from .flow import compute_flow, flow_5m_status
 from .filters import evaluate_pair, extract_metrics
 from .metrics import add_lag_sample, increment_counter, increment_daily_counter, update_rate_counter
@@ -172,6 +167,9 @@ class Scanner:
         self._performance_lock = asyncio.Lock()
         self._backfill_lock = asyncio.Lock()
         self._last_flow_5m_log_at = 0
+        self._holders_lock = asyncio.Lock()
+        self._holders_inflight: set[str] = set()
+        self._holders_sem = asyncio.Semaphore(2)
 
     async def scan_job(self, context) -> None:
         if self._scan_lock.locked():
@@ -459,9 +457,6 @@ class Scanner:
 
             first_seen_ts = self._first_seen_ts(primary_candidate.pair, token_row)
             trigger_reason = build_trigger_reason(config.filters)
-            wallet_analysis = self._get_cached_wallet_analysis(
-                token_row, now, config.wallet_analysis_ttl_sec
-            )
             flow_data = compute_flow(
                 primary_candidate.pair,
                 holder_count=holder_count,
@@ -476,8 +471,8 @@ class Scanner:
                 config.chain_id,
                 trigger_reason,
                 config.alert_tagline,
-                wallet_analysis,
-                config.wallet_analysis_label,
+                None,
+                "",
                 flow_data,
             )
 
@@ -493,14 +488,14 @@ class Scanner:
                 await db.update_last_alerted(token_address, now)
                 await increment_counter(db, "alerted_count", 1)
                 await add_lag_sample(db, now - first_seen_ts, config.metrics_sample_size)
-                await self._maybe_schedule_wallet_analysis(
+                await self._maybe_schedule_holder_refresh(
                     token_address=token_address,
                     pair=primary_candidate.pair,
                     metrics=primary_result.metrics,
                     first_seen_ts=first_seen_ts,
                     trigger_reason=trigger_reason,
                     posted_refs=posted_refs,
-                    cached=wallet_analysis is not None,
+                    holder_count=holder_count,
                 )
 
     async def backfill_called_prices(self) -> None:
@@ -635,6 +630,113 @@ class Scanner:
         if "partial" not in data and token_row["wallet_analysis_partial"] is not None:
             data["partial"] = bool(token_row["wallet_analysis_partial"])
         return data
+
+    async def _maybe_schedule_holder_refresh(
+        self,
+        token_address: str,
+        pair: Dict[str, Any],
+        metrics,
+        first_seen_ts: int,
+        trigger_reason: str,
+        posted_refs: List[AlertMessageRef],
+        holder_count: Optional[int],
+    ) -> None:
+        config = self.ctx.config
+        if holder_count is not None:
+            return
+        if not config.holder_count_enabled or self.ctx.helius_client is None:
+            return
+        async with self._holders_lock:
+            if token_address in self._holders_inflight:
+                return
+            self._holders_inflight.add(token_address)
+        asyncio.create_task(
+            self._run_holder_refresh(
+                token_address=token_address,
+                pair=pair,
+                metrics=metrics,
+                first_seen_ts=first_seen_ts,
+                trigger_reason=trigger_reason,
+                posted_refs=posted_refs,
+            )
+        )
+
+    async def _run_holder_refresh(
+        self,
+        token_address: str,
+        pair: Dict[str, Any],
+        metrics,
+        first_seen_ts: int,
+        trigger_reason: str,
+        posted_refs: List[AlertMessageRef],
+    ) -> None:
+        try:
+            if self.ctx.helius_client is None:
+                return
+            async with self._holders_sem:
+                holders = await self.ctx.helius_client.get_token_holder_count(token_address)
+            if holders is None:
+                self.ctx.logger.info(
+                    "holder_count_unavailable",
+                    extra={"token": token_address, "pair": pair.get("pairAddress")},
+                )
+                return
+            now = utc_now_ts()
+            token_row = await self.ctx.db.get_token(token_address)
+            if token_row is None:
+                return
+            snapshot = _metrics_snapshot(
+                pair,
+                metrics,
+                holder_count=holders,
+                holder_min=self.ctx.config.holder_count_min,
+            )
+            eligible_first_metrics = token_row["eligible_first_metrics"] or snapshot
+            await self.ctx.db.update_token_state(
+                token_address=token_address,
+                last_checked_at=now,
+                last_eligible=bool(token_row["last_eligible"]),
+                last_eligible_at=token_row["last_eligible_at"],
+                last_ineligible_at=token_row["last_ineligible_at"],
+                last_seen_metrics=snapshot,
+                eligible_first_at=token_row["eligible_first_at"],
+                eligible_first_metrics=eligible_first_metrics,
+                last_name=token_row["last_name"],
+                last_symbol=token_row["last_symbol"],
+                called_price_usd=token_row["called_price_usd"],
+                max_price_usd=token_row["max_price_usd"],
+                max_market_cap=token_row["max_market_cap"],
+                hit_2x_at=token_row["hit_2x_at"],
+                hit_3x_at=token_row["hit_3x_at"],
+                hit_5x_at=token_row["hit_5x_at"],
+            )
+            flow_data = compute_flow(
+                pair,
+                holder_count=holders,
+                holder_min=self.ctx.config.holder_count_min,
+            )
+            updated_text = format_alert_message(
+                pair,
+                token_address,
+                metrics,
+                first_seen_ts,
+                self.ctx.config.display_timezone,
+                self.ctx.config.chain_id,
+                trigger_reason,
+                self.ctx.config.alert_tagline,
+                None,
+                "",
+                flow_data,
+            )
+            await self._edit_alerts(posted_refs, updated_text, pair, token_address)
+            self.ctx.logger.info(
+                "holder_count_updated", extra={"token": token_address, "holders": holders}
+            )
+        except Exception:
+            self.ctx.logger.exception("holder_count_refresh_failed", extra={"token": token_address})
+        finally:
+            async with self._holders_lock:
+                self._holders_inflight.discard(token_address)
 
     async def _maybe_schedule_wallet_analysis(
         self,
