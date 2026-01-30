@@ -17,7 +17,6 @@ from .logger import setup_logging
 from .scheduler import Scanner, PERFORMANCE_REFRESH_INTERVAL_SEC
 from .types import AppContext
 from .wallet_analysis import HeliusClient
-from .utils import effective_flow_score_min
 
 
 def main() -> None:
@@ -73,7 +72,6 @@ def main() -> None:
         )
         application.bot_data["perf_job"] = perf_job
         asyncio.create_task(scanner.backfill_called_prices())
-        flow_score_min_effective = effective_flow_score_min(config.flow_score_min)
         logger.info(
             "bot_ready",
             extra={
@@ -85,8 +83,6 @@ def main() -> None:
                 "dry_run": config.dry_run,
                 "holder_count_enabled": config.holder_count_enabled,
                 "holder_count_min": config.holder_count_min,
-                "flow_score_min": config.flow_score_min,
-                "flow_score_min_effective": flow_score_min_effective,
             },
         )
 

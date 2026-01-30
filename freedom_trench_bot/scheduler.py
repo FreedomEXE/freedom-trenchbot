@@ -8,7 +8,6 @@ from typing import Any, Dict, List, Optional, Tuple
 from telegram.constants import ParseMode
 
 from .bot import build_alert_keyboard, format_alert_message, build_trigger_reason
-from .flow import compute_flow, flow_5m_status
 from .filters import evaluate_pair, extract_metrics
 from .metrics import add_lag_sample, increment_counter, increment_daily_counter, update_rate_counter
 from .types import AppContext, PairCandidate
@@ -59,10 +58,8 @@ def _metrics_snapshot(
     pair: Dict[str, Any],
     metrics,
     holder_count: Optional[int] = None,
-    holder_min: int = 100,
 ) -> str:
     price_usd = _to_float(pair.get("priceUsd"))
-    flow = compute_flow(pair, holder_count=holder_count, holder_min=holder_min)
     data = {
         "pairAddress": pair.get("pairAddress"),
         "marketCap": metrics.market_cap_value,
@@ -73,7 +70,6 @@ def _metrics_snapshot(
         "change24h": metrics.change_24h,
         "priceUsd": price_usd,
         "holderCount": holder_count,
-        "flow": flow,
     }
     return json.dumps(data, ensure_ascii=True)
 
@@ -166,7 +162,6 @@ class Scanner:
         self._analysis_sem = asyncio.Semaphore(concurrency)
         self._performance_lock = asyncio.Lock()
         self._backfill_lock = asyncio.Lock()
-        self._last_flow_5m_log_at = 0
         self._holders_lock = asyncio.Lock()
         self._holders_inflight: set[str] = set()
         self._holders_sem = asyncio.Semaphore(2)
@@ -212,16 +207,7 @@ class Scanner:
         await update_rate_counter(db, "candidates", len(fresh_pairs), now)
 
         candidates = self._dedup_candidates(fresh_pairs, config.candidate_pool_max)
-        flow_5m_total = 0
-        flow_5m_missing = 0
-        flow_5m_zero = 0
         for candidate in candidates:
-            flow_5m_total += 1
-            missing_5m, zero_5m = flow_5m_status(candidate.pair)
-            if missing_5m:
-                flow_5m_missing += 1
-            elif zero_5m:
-                flow_5m_zero += 1
             metrics = extract_metrics(candidate.pair, config.use_fdv_as_mc_proxy)
             await db.upsert_pair_pool(
                 pair_address=candidate.pair_address,
@@ -256,12 +242,6 @@ class Scanner:
             pair = _extract_pair(payload)
             if not pair:
                 continue
-            missing_5m, zero_5m = flow_5m_status(pair)
-            flow_5m_total += 1
-            if missing_5m:
-                flow_5m_missing += 1
-            elif zero_5m:
-                flow_5m_zero += 1
             hot_score = _pair_sort_key(pair)
             candidate = PairCandidate(
                 pair_address=row["pair_address"],
@@ -279,18 +259,6 @@ class Scanner:
                 candidate.hot_score,
                 _metrics_snapshot(pair, metrics),
             )
-
-        if flow_5m_total and (flow_5m_missing or flow_5m_zero):
-            if now - self._last_flow_5m_log_at >= 300:
-                logger.info(
-                    "flow_5m_stats",
-                    extra={
-                        "candidates": flow_5m_total,
-                        "missing": flow_5m_missing,
-                        "zero": flow_5m_zero,
-                    },
-                )
-                self._last_flow_5m_log_at = now
 
         await update_rate_counter(db, "pairs_fetched", hot_fetch_count, now)
         await increment_counter(db, "scanned_pairs", len(candidates))
@@ -357,7 +325,6 @@ class Scanner:
                 primary_candidate.pair,
                 primary_result.metrics,
                 holder_count=holder_count,
-                holder_min=config.holder_count_min,
             )
             price_usd = _to_float(primary_candidate.pair.get("priceUsd"))
             market_cap_value = primary_result.metrics.market_cap_value
@@ -457,11 +424,6 @@ class Scanner:
 
             first_seen_ts = self._first_seen_ts(primary_candidate.pair, token_row)
             trigger_reason = build_trigger_reason(config.filters)
-            flow_data = compute_flow(
-                primary_candidate.pair,
-                holder_count=holder_count,
-                holder_min=config.holder_count_min,
-            )
             text = format_alert_message(
                 primary_candidate.pair,
                 token_address,
@@ -473,7 +435,6 @@ class Scanner:
                 config.alert_tagline,
                 None,
                 "",
-                flow_data,
             )
 
             if config.dry_run:
@@ -689,7 +650,6 @@ class Scanner:
                 pair,
                 metrics,
                 holder_count=holders,
-                holder_min=self.ctx.config.holder_count_min,
             )
             eligible_first_metrics = token_row["eligible_first_metrics"] or snapshot
             await self.ctx.db.update_token_state(
@@ -710,11 +670,6 @@ class Scanner:
                 hit_3x_at=token_row["hit_3x_at"],
                 hit_5x_at=token_row["hit_5x_at"],
             )
-            flow_data = compute_flow(
-                pair,
-                holder_count=holders,
-                holder_min=self.ctx.config.holder_count_min,
-            )
             updated_text = format_alert_message(
                 pair,
                 token_address,
@@ -726,7 +681,6 @@ class Scanner:
                 self.ctx.config.alert_tagline,
                 None,
                 "",
-                flow_data,
             )
             await self._edit_alerts(posted_refs, updated_text, pair, token_address)
             self.ctx.logger.info(
@@ -809,11 +763,6 @@ class Scanner:
             token_row = await self.ctx.db.get_token(token_address)
             if token_row is not None:
                 holder_count = _snapshot_holder_count(token_row["eligible_first_metrics"])
-            flow_data = compute_flow(
-                pair,
-                holder_count=holder_count,
-                holder_min=self.ctx.config.holder_count_min,
-            )
             updated_text = format_alert_message(
                 pair,
                 token_address,
@@ -825,7 +774,6 @@ class Scanner:
                 self.ctx.config.alert_tagline,
                 analysis_data,
                 self.ctx.config.wallet_analysis_label,
-                flow_data,
             )
             await self._edit_alerts(
                 posted_refs,

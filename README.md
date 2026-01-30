@@ -28,13 +28,10 @@ This avoids HTML scraping and stays within rate limits. Tune pool size, hot rech
 Set `MARKET_BASE_TOKENS` to add additional base tokens to sample.
 
 ## Holder count (optional)
-Holder count uses the Helius RPC to estimate token holders at alert time and adds a small boost to Flow scoring.
-It also displays a "Holders" line in alerts and `/eligible` when available.
+Holder count uses the Helius RPC to estimate token holders at alert time and stores the count in snapshots for later analysis.
 
 Requires a Helius API key:
 - `HELIUS_API_KEY=...`
-
-Flow scoring uses Dexscreener 5m + 1h txns/volume to add a one-line "Flow" label. If a Helius key is configured, it also adds a holder-count boost.
 
 ## Setup
 1) Use Python 3.12.x (see `.python-version`).
@@ -69,13 +66,12 @@ Set `DRY_RUN=true` to log would-alert tokens without posting to Telegram.
 - `ALLOWED_THREAD_IDS` (restrict alerts to specific thread IDs in a group)
 - `CALLED_LIST_LIMIT` (max items in `/stats`)
 - `ALERT_TAGLINE` (custom line shown in alert messages)
-- `FLOW_SCORE_MIN` (threshold for flow-filtered performance simulations; default 60, effective cap 60)
-- `HOLDER_COUNT_ENABLED` and `HOLDER_COUNT_MIN` (optional holder-count boost to Flow; requires `HELIUS_API_KEY`)
+- `HOLDER_COUNT_ENABLED` and `HOLDER_COUNT_MIN` (optional holder-count lookups; requires `HELIUS_API_KEY`)
 
 ## Commands
 - `/start` - onboarding and status
 - `/status` - monitoring status, last scan, counters, filters
-- `/eligible` - list currently eligible tokens (flow filtered)
+- `/eligible` - list currently eligible tokens
 - `/filters` - current filters
 - `/performance [7d|30d|all] [export]` - performance summary (default all-time), optional CSV export
 - `/health` - health summary (admin only)
@@ -85,7 +81,7 @@ Set `DRY_RUN=true` to log would-alert tokens without posting to Telegram.
 - `/help` - quick help
 
 ## Alert format
-Alerts fire only once when a token is first discovered eligible. The message includes token name/symbol, chain, CA, market cap (or FDV proxy), first seen, holder count (if available), and links. A one-line "Flow" score is appended.
+Alerts fire only once when a token is first discovered eligible. The message includes token name/symbol, chain, CA, market cap (or FDV proxy), first seen, and links.
 
 ## Brand kit
 SVG logo: `assets/freedom-trench-bot.svg`
