@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from telegram.constants import ParseMode
 
-from .bot import build_alert_keyboard, format_alert_message, build_trigger_reason
+from .bot import build_alert_keyboard, format_alert_message, format_sell_message, build_trigger_reason
 from .filters import evaluate_pair, extract_metrics
 from .metrics import add_lag_sample, increment_counter, increment_daily_counter, update_rate_counter
 from .types import AppContext, PairCandidate
@@ -375,6 +375,7 @@ class Scanner:
                 last_ineligible_at = now
 
             recouped_at = token_row["recouped_at"]
+            recouped_just_now = False
             if (
                 recouped_at is None
                 and called_price_usd
@@ -384,6 +385,7 @@ class Scanner:
                 target_price = called_price_usd * config.sim_target_multiple
                 if price_usd >= target_price:
                     recouped_at = now
+                    recouped_just_now = True
             post_alert_price_usd = token_row["post_alert_price_usd"]
             post_alert_at = token_row["post_alert_at"]
             if (
@@ -476,6 +478,22 @@ class Scanner:
 
             if not eligible:
                 continue
+
+            if recouped_just_now and token_row["sim_taken"]:
+                if not muted and config.allowed_chat_ids:
+                    sell_text = format_sell_message(
+                        primary_candidate.pair,
+                        token_address,
+                        primary_result.metrics,
+                        price_usd,
+                        config.display_timezone,
+                        recouped_at,
+                        sim_cash,
+                    )
+                    if config.dry_run:
+                        print(sell_text)
+                    else:
+                        await self._post_alert(sell_text, primary_candidate.pair, token_address)
 
             already_alerted = token_row["last_alerted_at"]
             if already_alerted:

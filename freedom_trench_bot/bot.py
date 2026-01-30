@@ -33,6 +33,7 @@ from .utils import (
 
 WELCOME_HEADER = "+----------------------------+\n| Freedom Trench Bot         |\n| Solana Alerts              |\n+----------------------------+"
 ALERT_HEADER = "+----------------------------+\n| Freedom Trench Bot         |\n| APED 🚀                    |\n+----------------------------+"
+SELL_HEADER = "+----------------------------+\n| Freedom Trench Bot         |\n| SOLD ✅                    |\n+----------------------------+"
 
 STARTUP_FRAMES = [
     "> initializing...",
@@ -486,6 +487,52 @@ def format_alert_message(
                 f"Solscan: <a href=\"https://solscan.io/token/{token_address}\">link</a>",
             ]
         )
+    return "\n".join(lines)
+
+
+def format_sell_message(
+    pair: dict,
+    token_address: str,
+    metrics: FilterMetrics,
+    sold_price: Optional[float],
+    tz_name: str,
+    sold_at: int,
+    cash_balance: Optional[float],
+) -> str:
+    base = pair.get("baseToken") or {}
+    quote = pair.get("quoteToken") or {}
+    token_address_lc = token_address.lower()
+    token_obj = base
+    if isinstance(base, dict) and base.get("address") and base["address"].lower() == token_address_lc:
+        token_obj = base
+    elif (
+        isinstance(quote, dict)
+        and quote.get("address")
+        and quote["address"].lower() == token_address_lc
+    ):
+        token_obj = quote
+    name = escape_html(token_obj.get("name") or "Unknown")
+    symbol = escape_html(token_obj.get("symbol") or "?")
+    mcap_suffix = ""
+    if metrics.market_cap_label != "Market Cap":
+        mcap_suffix = f" ({escape_html(metrics.market_cap_label)})"
+
+    header_block = f"<pre>{SELL_HEADER}</pre>"
+    ca_block = f"<pre>{escape_html(token_address)}</pre>"
+
+    lines = [
+        header_block,
+        "Recouped initial position",
+        f"Token: {name} ({symbol})",
+        "Chain: Solana",
+        "CA:",
+        ca_block,
+        f"Sold price: {_format_price(sold_price)}",
+        f"MCap (sold): {format_usd(metrics.market_cap_value)}{mcap_suffix}",
+        f"Sold at: {format_ts(sold_at, tz_name)}",
+    ]
+    if cash_balance is not None:
+        lines.append(f"Account balance (cash): {_format_usd2(cash_balance)}")
     return "\n".join(lines)
 
 
