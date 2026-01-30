@@ -3,12 +3,13 @@ from __future__ import annotations
 import asyncio
 import os
 import signal
+import time
 
 import aiohttp
 from dotenv import load_dotenv
 from telegram.ext import ApplicationBuilder
 
-from .bot import register_handlers
+from .bot import register_handlers, send_startup_animation_to_chat
 from .config import load_config
 from .db import Database
 from .dexscreener import DexscreenerClient
@@ -33,6 +34,19 @@ def main() -> None:
     async def post_init(application):
         db = await Database.connect(config.sqlite_path)
         await db.init()
+        now = int(time.time())
+        sim_reset = await db.get_state_int("sim_reset_at", 0)
+        if sim_reset == 0:
+            await db.set_state("sim_reset_at", str(now))
+        sim_start = await db.get_state_float("sim_start_balance", 0.0)
+        if sim_start <= 0:
+            await db.set_state("sim_start_balance", str(config.sim_start_balance))
+        sim_position = await db.get_state_float("sim_position_size", 0.0)
+        if sim_position <= 0:
+            await db.set_state("sim_position_size", str(config.sim_position_size))
+        sim_cash = await db.get_state_float("sim_cash", 0.0)
+        if sim_cash <= 0:
+            await db.set_state("sim_cash", str(config.sim_start_balance))
 
         timeout = aiohttp.ClientTimeout(total=config.dex_timeout_sec)
         session = aiohttp.ClientSession(timeout=timeout)
@@ -70,6 +84,8 @@ def main() -> None:
             first=15,
             name="performance_tracker",
         )
+        for chat_id in config.allowed_chat_ids:
+            asyncio.create_task(send_startup_animation_to_chat(application.bot, chat_id))
         application.bot_data["perf_job"] = perf_job
         asyncio.create_task(scanner.backfill_called_prices())
         logger.info(

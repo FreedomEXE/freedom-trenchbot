@@ -43,6 +43,16 @@ class Database:
                 max_price_usd REAL,
                 min_price_usd REAL,
                 max_market_cap REAL,
+                post_alert_price_usd REAL,
+                post_alert_at INTEGER,
+                above_target_started_at INTEGER,
+                above_target_last_at INTEGER,
+                above_target_total_sec INTEGER,
+                sim_taken INTEGER,
+                sim_cash_before REAL,
+                sim_cash_after REAL,
+                sim_position_usd REAL,
+                sim_ape_pct REAL,
                 wallet_analysis_at INTEGER,
                 wallet_analysis_json TEXT,
                 wallet_analysis_partial INTEGER,
@@ -73,6 +83,16 @@ class Database:
         await self._ensure_column("tokens", "max_price_usd", "REAL")
         await self._ensure_column("tokens", "min_price_usd", "REAL")
         await self._ensure_column("tokens", "max_market_cap", "REAL")
+        await self._ensure_column("tokens", "post_alert_price_usd", "REAL")
+        await self._ensure_column("tokens", "post_alert_at", "INTEGER")
+        await self._ensure_column("tokens", "above_target_started_at", "INTEGER")
+        await self._ensure_column("tokens", "above_target_last_at", "INTEGER")
+        await self._ensure_column("tokens", "above_target_total_sec", "INTEGER")
+        await self._ensure_column("tokens", "sim_taken", "INTEGER")
+        await self._ensure_column("tokens", "sim_cash_before", "REAL")
+        await self._ensure_column("tokens", "sim_cash_after", "REAL")
+        await self._ensure_column("tokens", "sim_position_usd", "REAL")
+        await self._ensure_column("tokens", "sim_ape_pct", "REAL")
         await self._ensure_column("tokens", "wallet_analysis_at", "INTEGER")
         await self._ensure_column("tokens", "wallet_analysis_json", "TEXT")
         await self._ensure_column("tokens", "wallet_analysis_partial", "INTEGER")
@@ -202,6 +222,11 @@ class Database:
         min_price_usd: Optional[float],
         max_market_cap: Optional[float],
         recouped_at: Optional[int],
+        post_alert_price_usd: Optional[float],
+        post_alert_at: Optional[int],
+        above_target_started_at: Optional[int],
+        above_target_last_at: Optional[int],
+        above_target_total_sec: Optional[int],
     ) -> None:
         assert self.conn is not None
         await self.conn.execute(
@@ -220,7 +245,12 @@ class Database:
                 max_price_usd = ?,
                 min_price_usd = ?,
                 max_market_cap = ?,
-                recouped_at = ?
+                recouped_at = ?,
+                post_alert_price_usd = ?,
+                post_alert_at = ?,
+                above_target_started_at = ?,
+                above_target_last_at = ?,
+                above_target_total_sec = ?
             WHERE token_address = ?
             """,
             (
@@ -238,6 +268,42 @@ class Database:
                 min_price_usd,
                 max_market_cap,
                 recouped_at,
+                post_alert_price_usd,
+                post_alert_at,
+                above_target_started_at,
+                above_target_last_at,
+                above_target_total_sec,
+                token_address,
+            ),
+        )
+        await self.conn.commit()
+
+    async def update_sim_state(
+        self,
+        token_address: str,
+        sim_taken: Optional[bool],
+        sim_cash_before: Optional[float],
+        sim_cash_after: Optional[float],
+        sim_position_usd: Optional[float],
+        sim_ape_pct: Optional[float],
+    ) -> None:
+        assert self.conn is not None
+        await self.conn.execute(
+            """
+            UPDATE tokens
+            SET sim_taken = ?,
+                sim_cash_before = ?,
+                sim_cash_after = ?,
+                sim_position_usd = ?,
+                sim_ape_pct = ?
+            WHERE token_address = ?
+            """,
+            (
+                1 if sim_taken else 0 if sim_taken is not None else None,
+                sim_cash_before,
+                sim_cash_after,
+                sim_position_usd,
+                sim_ape_pct,
                 token_address,
             ),
         )
@@ -289,8 +355,10 @@ class Database:
         assert self.conn is not None
         cur = await self.conn.execute(
             """
-            SELECT token_address, eligible_first_metrics, last_seen_metrics,
-                   called_price_usd, max_price_usd, min_price_usd, max_market_cap, recouped_at
+            SELECT token_address, eligible_first_at, eligible_first_metrics, last_seen_metrics,
+                   called_price_usd, max_price_usd, min_price_usd, max_market_cap, recouped_at,
+                   post_alert_price_usd, post_alert_at, above_target_started_at,
+                   above_target_last_at, above_target_total_sec, sim_taken
             FROM tokens
             WHERE eligible_first_at IS NOT NULL
               AND called_price_usd IS NULL
@@ -310,6 +378,11 @@ class Database:
         min_price_usd: Optional[float],
         max_market_cap: Optional[float],
         recouped_at: Optional[int],
+        post_alert_price_usd: Optional[float],
+        post_alert_at: Optional[int],
+        above_target_started_at: Optional[int],
+        above_target_last_at: Optional[int],
+        above_target_total_sec: Optional[int],
     ) -> None:
         assert self.conn is not None
         await self.conn.execute(
@@ -319,10 +392,27 @@ class Database:
                 max_price_usd = ?,
                 min_price_usd = ?,
                 max_market_cap = ?,
-                recouped_at = ?
+                recouped_at = ?,
+                post_alert_price_usd = ?,
+                post_alert_at = ?,
+                above_target_started_at = ?,
+                above_target_last_at = ?,
+                above_target_total_sec = ?
             WHERE token_address = ?
             """,
-            (called_price_usd, max_price_usd, min_price_usd, max_market_cap, recouped_at, token_address),
+            (
+                called_price_usd,
+                max_price_usd,
+                min_price_usd,
+                max_market_cap,
+                recouped_at,
+                post_alert_price_usd,
+                post_alert_at,
+                above_target_started_at,
+                above_target_last_at,
+                above_target_total_sec,
+                token_address,
+            ),
         )
         await self.conn.commit()
 
@@ -335,7 +425,9 @@ class Database:
                 """
                 SELECT token_address, eligible_first_at, last_name, last_symbol,
                        called_price_usd, max_price_usd, min_price_usd,
-                       last_seen_metrics, eligible_first_metrics, recouped_at
+                       last_seen_metrics, eligible_first_metrics, recouped_at,
+                       post_alert_price_usd, post_alert_at, above_target_total_sec,
+                       sim_taken, sim_cash_before, sim_cash_after, sim_position_usd, sim_ape_pct
                 FROM tokens
                 WHERE eligible_first_at IS NOT NULL
                 ORDER BY eligible_first_at DESC
@@ -348,7 +440,9 @@ class Database:
                 """
                 SELECT token_address, eligible_first_at, last_name, last_symbol,
                        called_price_usd, max_price_usd, min_price_usd,
-                       last_seen_metrics, eligible_first_metrics, recouped_at
+                       last_seen_metrics, eligible_first_metrics, recouped_at,
+                       post_alert_price_usd, post_alert_at, above_target_total_sec,
+                       sim_taken, sim_cash_before, sim_cash_after, sim_position_usd, sim_ape_pct
                 FROM tokens
                 WHERE eligible_first_at IS NOT NULL
                   AND eligible_first_at >= ?
@@ -381,15 +475,68 @@ class Database:
         await cur.close()
         return row["count"] if row else 0
 
+    async def count_called_before(self, max_first_at: int) -> int:
+        assert self.conn is not None
+        cur = await self.conn.execute(
+            """
+            SELECT COUNT(*) as count
+            FROM tokens
+            WHERE eligible_first_at IS NOT NULL
+              AND eligible_first_at < ?
+            """,
+            (max_first_at,),
+        )
+        row = await cur.fetchone()
+        await cur.close()
+        return row["count"] if row else 0
+
+    async def count_called_between(self, min_first_at: int, max_first_at: int) -> int:
+        assert self.conn is not None
+        cur = await self.conn.execute(
+            """
+            SELECT COUNT(*) as count
+            FROM tokens
+            WHERE eligible_first_at IS NOT NULL
+              AND eligible_first_at >= ?
+              AND eligible_first_at < ?
+            """,
+            (min_first_at, max_first_at),
+        )
+        row = await cur.fetchone()
+        await cur.close()
+        return row["count"] if row else 0
+
+    async def get_called_before(self, limit: int, max_first_at: int) -> List[aiosqlite.Row]:
+        assert self.conn is not None
+        cur = await self.conn.execute(
+            """
+            SELECT token_address, eligible_first_at, last_name, last_symbol,
+                   called_price_usd, max_price_usd, min_price_usd,
+                   last_seen_metrics, eligible_first_metrics, recouped_at,
+                   post_alert_price_usd, post_alert_at, above_target_total_sec,
+                   sim_taken, sim_cash_before, sim_cash_after, sim_position_usd, sim_ape_pct
+            FROM tokens
+            WHERE eligible_first_at IS NOT NULL
+              AND eligible_first_at < ?
+            ORDER BY eligible_first_at DESC
+            LIMIT ?
+            """,
+            (max_first_at, limit),
+        )
+        rows = await cur.fetchall()
+        await cur.close()
+        return rows
+
     async def get_called_for_refresh(
         self, limit: int, min_first_at: int
     ) -> List[aiosqlite.Row]:
         assert self.conn is not None
         cur = await self.conn.execute(
             """
-            SELECT token_address, eligible_first_metrics, last_seen_metrics,
+            SELECT token_address, eligible_first_at, eligible_first_metrics, last_seen_metrics,
                    called_price_usd, max_price_usd, min_price_usd, max_market_cap,
-                   recouped_at
+                   recouped_at, post_alert_price_usd, post_alert_at,
+                   above_target_started_at, above_target_last_at, above_target_total_sec, sim_taken
             FROM tokens
             WHERE eligible_first_at IS NOT NULL
               AND eligible_first_at >= ?
@@ -411,6 +558,11 @@ class Database:
         min_price_usd: Optional[float],
         max_market_cap: Optional[float],
         recouped_at: Optional[int],
+        post_alert_price_usd: Optional[float],
+        post_alert_at: Optional[int],
+        above_target_started_at: Optional[int],
+        above_target_last_at: Optional[int],
+        above_target_total_sec: Optional[int],
     ) -> None:
         assert self.conn is not None
         await self.conn.execute(
@@ -421,7 +573,12 @@ class Database:
                 max_price_usd = ?,
                 min_price_usd = ?,
                 max_market_cap = ?,
-                recouped_at = ?
+                recouped_at = ?,
+                post_alert_price_usd = ?,
+                post_alert_at = ?,
+                above_target_started_at = ?,
+                above_target_last_at = ?,
+                above_target_total_sec = ?
             WHERE token_address = ?
             """,
             (
@@ -431,6 +588,11 @@ class Database:
                 min_price_usd,
                 max_market_cap,
                 recouped_at,
+                post_alert_price_usd,
+                post_alert_at,
+                above_target_started_at,
+                above_target_last_at,
+                above_target_total_sec,
                 token_address,
             ),
         )
@@ -565,7 +727,9 @@ class Database:
             """
             SELECT token_address, eligible_first_at, eligible_first_metrics,
                    last_seen_metrics, last_name, last_symbol,
-                   called_price_usd, max_price_usd, min_price_usd, max_market_cap, recouped_at
+                   called_price_usd, max_price_usd, min_price_usd, max_market_cap, recouped_at,
+                   post_alert_price_usd, post_alert_at, above_target_total_sec,
+                   sim_taken, sim_cash_before, sim_cash_after, sim_position_usd, sim_ape_pct
             FROM tokens
             WHERE eligible_first_at IS NOT NULL
               AND eligible_first_at >= ?

@@ -54,6 +54,7 @@ class Config:
     sim_target_multiple: float
     sim_buy_fee_pct: float
     sim_sell_fee_pct: float
+    sim_slippage_sample_sec: int
 
     dex_max_rps: int
     dex_max_concurrency: int
@@ -125,6 +126,7 @@ def load_config() -> Config:
     sim_target_multiple = float(os.getenv("SIM_TARGET_MULTIPLE", "1.3"))
     sim_buy_fee_pct = float(os.getenv("SIM_BUY_FEE_PCT", "1.0"))
     sim_sell_fee_pct = float(os.getenv("SIM_SELL_FEE_PCT", "1.0"))
+    sim_slippage_sample_sec = int(os.getenv("SIM_SLIPPAGE_SAMPLE_SEC", "30"))
 
     dex_max_rps = int(os.getenv("DEX_MAX_RPS", "5"))
     dex_max_concurrency = int(os.getenv("DEX_MAX_CONCURRENCY", "2"))
@@ -188,6 +190,7 @@ def load_config() -> Config:
         sim_target_multiple=sim_target_multiple,
         sim_buy_fee_pct=sim_buy_fee_pct,
         sim_sell_fee_pct=sim_sell_fee_pct,
+        sim_slippage_sample_sec=sim_slippage_sample_sec,
         dex_max_rps=dex_max_rps,
         dex_max_concurrency=dex_max_concurrency,
         dex_timeout_sec=dex_timeout_sec,

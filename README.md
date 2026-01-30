@@ -1,6 +1,6 @@
 # Freedom Trench Bot
 
-Freedom Trench Bot monitors Solana markets via the Dexscreener API and posts alerts to allowlisted Telegram group chats when tokens become eligible. It also keeps a 24h "currently eligible" list for quick review. It does not trade or manage wallets.
+Freedom Trench Bot monitors Solana markets via the Dexscreener API and posts alerts to allowlisted Telegram group chats when tokens become eligible. It does not trade or manage wallets.
 
 ## Architecture (brief)
 - Telegram bot (python-telegram-bot) handles commands, admin checks, and alert delivery.
@@ -67,15 +67,15 @@ Set `DRY_RUN=true` to log would-alert tokens without posting to Telegram.
 - `CALLED_LIST_LIMIT` (max items in `/stats`)
 - `ALERT_TAGLINE` (custom line shown in alert messages)
 - `HOLDER_COUNT_ENABLED` and `HOLDER_COUNT_MIN` (optional holder-count lookups; requires `HELIUS_API_KEY`)
-- `SIM_START_BALANCE`, `SIM_POSITION_SIZE`, `SIM_TARGET_MULTIPLE`, `SIM_BUY_FEE_PCT`, `SIM_SELL_FEE_PCT` (simulation settings)
+- `SIM_START_BALANCE`, `SIM_POSITION_SIZE`, `SIM_TARGET_MULTIPLE`, `SIM_BUY_FEE_PCT`, `SIM_SELL_FEE_PCT`, `SIM_SLIPPAGE_SAMPLE_SEC` (simulation settings)
 
 ## Commands
 - `/start` - onboarding and status
 - `/status` - monitoring status, last scan, counters, filters
-- `/eligible` - list currently eligible tokens
 - `/stats` - list tokens called in the last 24h
 - `/filters` - current filters
 - `/performance [7d|30d|all] [export]` - simulation summary (default all-time), optional CSV export
+- `/archive [7d|30d|all]` - archive summary before reset
 - `/health` - health summary (admin only)
 - `/pause` - pause monitoring (admin only)
 - `/resume` - resume monitoring (admin only)
@@ -83,15 +83,17 @@ Set `DRY_RUN=true` to log would-alert tokens without posting to Telegram.
 - `/reset` - reset simulation baseline (admin only)
 - `/help` - quick help
 
+On `/start`, admins can choose the simulated bankroll and position size before starting the run.
+
 ## Alert format
-Alerts fire only once when a token is first discovered eligible. The message includes token name/symbol, chain, CA, market cap (or FDV proxy), first seen, and links.
+Alerts fire only once when a token is first discovered eligible. The message includes token name/symbol, chain, CA, ape market cap, ape price, simulated position size (% of cash), cash balance, first seen, and links.
 
 ## Brand kit
 SVG logo: `assets/freedom-trench-bot.svg`
 
 ## Notes
 - If `marketCap` is missing, FDV is only used when `USE_FDV_AS_MC_PROXY=true` and is labeled as a proxy.
-- Alerts only fire once per token; check `/eligible` to see the currently eligible list.
+- Alerts only fire once per token; use `/stats` and `/performance` for simulation tracking.
 - Missing change or volume fields fail the filter by design.
 - Performance tracking is best-effort; inactive tokens may update less frequently.
 - No trading, wallet creation, or automation is included.

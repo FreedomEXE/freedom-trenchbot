@@ -201,6 +201,17 @@ class Scanner:
 
         mute_until = await db.get_state_int("mute_until", 0)
         muted = mute_until > now
+        sim_reset_at = await db.get_state_int("sim_reset_at", 0)
+        if sim_reset_at == 0:
+            sim_reset_at = now
+            await db.set_state("sim_reset_at", str(sim_reset_at))
+        sim_start_balance = await db.get_state_float(
+            "sim_start_balance", config.sim_start_balance
+        )
+        sim_position_size = await db.get_state_float(
+            "sim_position_size", config.sim_position_size
+        )
+        sim_cash = await db.get_state_float("sim_cash", sim_start_balance)
 
         fresh_pairs = await self.ctx.discovery.discover_pairs()
         await increment_counter(db, "scans", 1)
@@ -371,6 +382,39 @@ class Scanner:
                 target_price = called_price_usd * config.sim_target_multiple
                 if price_usd >= target_price:
                     recouped_at = now
+            post_alert_price_usd = token_row["post_alert_price_usd"]
+            post_alert_at = token_row["post_alert_at"]
+            if (
+                post_alert_price_usd is None
+                and eligible_first_at
+                and price_usd
+                and now - eligible_first_at >= config.sim_slippage_sample_sec
+            ):
+                post_alert_price_usd = price_usd
+                post_alert_at = now
+            above_target_started_at = token_row["above_target_started_at"]
+            above_target_last_at = token_row["above_target_last_at"]
+            above_target_total_sec = token_row["above_target_total_sec"] or 0
+            if called_price_usd and price_usd:
+                target_price = called_price_usd * config.sim_target_multiple
+                if price_usd >= target_price:
+                    if above_target_started_at is None:
+                        above_target_started_at = now
+                    above_target_last_at = now
+                else:
+                    if above_target_started_at is not None and above_target_last_at is not None:
+                        above_target_total_sec += max(0, above_target_last_at - above_target_started_at)
+                    above_target_started_at = None
+                    above_target_last_at = None
+
+            if (
+                recouped_at is not None
+                and token_row["recouped_at"] is None
+                and token_row["sim_taken"]
+                and eligible_first_at
+                and eligible_first_at >= sim_reset_at
+            ):
+                sim_cash += sim_position_size
 
             await db.update_token_state(
                 token_address=token_address,
@@ -388,6 +432,11 @@ class Scanner:
                 min_price_usd=min_price_usd,
                 max_market_cap=max_market_cap,
                 recouped_at=recouped_at,
+                post_alert_price_usd=post_alert_price_usd,
+                post_alert_at=post_alert_at,
+                above_target_started_at=above_target_started_at,
+                above_target_last_at=above_target_last_at,
+                above_target_total_sec=above_target_total_sec,
             )
             await db.update_pair_checked(
                 primary_candidate.pair_address,
@@ -411,20 +460,42 @@ class Scanner:
             if not eligible:
                 continue
 
-            if muted:
-                logger.info("alert_suppressed_muted", extra={"token": token_address})
-                continue
-
-            if not config.allowed_chat_ids:
-                logger.warning("allowlist_empty_skip_post")
-                continue
-
             already_alerted = token_row["last_alerted_at"]
             if already_alerted:
                 continue
 
             first_seen_ts = self._first_seen_ts(primary_candidate.pair, token_row)
             trigger_reason = build_trigger_reason(config.filters)
+            sim_taken = False
+            sim_cash_before = sim_cash
+            sim_cash_after = sim_cash
+            sim_ape_pct = None
+            if sim_cash_before > 0:
+                sim_ape_pct = (sim_position_size / sim_cash_before) * 100.0
+            if sim_cash >= sim_position_size:
+                sim_taken = True
+                sim_cash_after = sim_cash - sim_position_size
+                sim_cash = sim_cash_after
+            await db.update_sim_state(
+                token_address=token_address,
+                sim_taken=sim_taken,
+                sim_cash_before=sim_cash_before,
+                sim_cash_after=sim_cash_after,
+                sim_position_usd=sim_position_size,
+                sim_ape_pct=sim_ape_pct,
+            )
+
+            if muted:
+                logger.info("alert_suppressed_muted", extra={"token": token_address})
+                await db.update_last_alerted(token_address, now)
+                await db.set_state("sim_cash", str(sim_cash))
+                continue
+
+            if not config.allowed_chat_ids:
+                logger.warning("allowlist_empty_skip_post")
+                await db.update_last_alerted(token_address, now)
+                await db.set_state("sim_cash", str(sim_cash))
+                continue
             text = format_alert_message(
                 primary_candidate.pair,
                 token_address,
@@ -434,6 +505,11 @@ class Scanner:
                 config.chain_id,
                 trigger_reason,
                 config.alert_tagline,
+                sim_position_size if sim_taken else None,
+                sim_ape_pct,
+                sim_cash_after,
+                called_price_usd or price_usd,
+                sim_taken,
                 None,
                 "",
             )
@@ -443,6 +519,7 @@ class Scanner:
                 await db.update_last_alerted(token_address, now)
                 await increment_counter(db, "alerted_count", 1)
                 await add_lag_sample(db, now - first_seen_ts, config.metrics_sample_size)
+                await db.set_state("sim_cash", str(sim_cash))
                 continue
 
             posted_refs = await self._post_alert(text, primary_candidate.pair, token_address)
@@ -450,6 +527,7 @@ class Scanner:
                 await db.update_last_alerted(token_address, now)
                 await increment_counter(db, "alerted_count", 1)
                 await add_lag_sample(db, now - first_seen_ts, config.metrics_sample_size)
+                await db.set_state("sim_cash", str(sim_cash))
                 await self._maybe_schedule_holder_refresh(
                     token_address=token_address,
                     pair=primary_candidate.pair,
@@ -459,6 +537,7 @@ class Scanner:
                     posted_refs=posted_refs,
                     holder_count=holder_count,
                 )
+        await db.set_state("sim_cash", str(sim_cash))
 
     async def backfill_called_prices(self) -> None:
         if self._backfill_lock.locked():
@@ -467,6 +546,17 @@ class Scanner:
             if await self.ctx.db.get_state_bool("performance_backfill_done", False):
                 return
             self.ctx.logger.info("performance_backfill_start")
+            sim_reset_at = await self.ctx.db.get_state_int("sim_reset_at", 0)
+            if sim_reset_at == 0:
+                sim_reset_at = utc_now_ts()
+                await self.ctx.db.set_state("sim_reset_at", str(sim_reset_at))
+            sim_start_balance = await self.ctx.db.get_state_float(
+                "sim_start_balance", self.ctx.config.sim_start_balance
+            )
+            sim_position_size = await self.ctx.db.get_state_float(
+                "sim_position_size", self.ctx.config.sim_position_size
+            )
+            sim_cash = await self.ctx.db.get_state_float("sim_cash", sim_start_balance)
             batch_size = 500
             while True:
                 rows = await self.ctx.db.get_tokens_missing_called_price(batch_size)
@@ -501,6 +591,42 @@ class Scanner:
                         target_price = called_price * self.ctx.config.sim_target_multiple
                         if last_price >= target_price:
                             recouped_at = utc_now_ts()
+                    if (
+                        recouped_at is not None
+                        and row["recouped_at"] is None
+                        and row["sim_taken"]
+                        and row["eligible_first_at"]
+                        and row["eligible_first_at"] >= sim_reset_at
+                    ):
+                        sim_cash += sim_position_size
+                    post_alert_price_usd = row["post_alert_price_usd"]
+                    post_alert_at = row["post_alert_at"]
+                    if (
+                        post_alert_price_usd is None
+                        and row["eligible_first_metrics"]
+                        and last_price
+                        and row["eligible_first_at"]
+                        and utc_now_ts() - row["eligible_first_at"]
+                        >= self.ctx.config.sim_slippage_sample_sec
+                    ):
+                        post_alert_price_usd = last_price
+                        post_alert_at = utc_now_ts()
+                    above_target_started_at = row["above_target_started_at"]
+                    above_target_last_at = row["above_target_last_at"]
+                    above_target_total_sec = row["above_target_total_sec"] or 0
+                    if called_price and last_price:
+                        target_price = called_price * self.ctx.config.sim_target_multiple
+                        if last_price >= target_price:
+                            if above_target_started_at is None:
+                                above_target_started_at = utc_now_ts()
+                            above_target_last_at = utc_now_ts()
+                        else:
+                            if above_target_started_at is not None and above_target_last_at is not None:
+                                above_target_total_sec += max(
+                                    0, above_target_last_at - above_target_started_at
+                                )
+                            above_target_started_at = None
+                            above_target_last_at = None
                     await self.ctx.db.update_called_prices(
                         token_address=token_address,
                         called_price_usd=called_price,
@@ -508,18 +634,35 @@ class Scanner:
                         min_price_usd=min_price,
                         max_market_cap=max_market_cap,
                         recouped_at=recouped_at,
+                        post_alert_price_usd=post_alert_price_usd,
+                        post_alert_at=post_alert_at,
+                        above_target_started_at=above_target_started_at,
+                        above_target_last_at=above_target_last_at,
+                        above_target_total_sec=above_target_total_sec,
                     )
                     updated += 1
                 if updated == 0:
                     self.ctx.logger.info("performance_backfill_no_progress")
                     break
                 await asyncio.sleep(0)
+            await self.ctx.db.set_state("sim_cash", str(sim_cash))
             await self.ctx.db.set_state("performance_backfill_done", "true")
             self.ctx.logger.info("performance_backfill_done")
 
     async def refresh_performance_batch(self) -> None:
         now = utc_now_ts()
         min_first_at = now - PERFORMANCE_LOOKBACK_DAYS * 86400
+        sim_reset_at = await self.ctx.db.get_state_int("sim_reset_at", 0)
+        if sim_reset_at == 0:
+            sim_reset_at = now
+            await self.ctx.db.set_state("sim_reset_at", str(sim_reset_at))
+        sim_start_balance = await self.ctx.db.get_state_float(
+            "sim_start_balance", self.ctx.config.sim_start_balance
+        )
+        sim_position_size = await self.ctx.db.get_state_float(
+            "sim_position_size", self.ctx.config.sim_position_size
+        )
+        sim_cash = await self.ctx.db.get_state_float("sim_cash", sim_start_balance)
         rows = await self.ctx.db.get_called_for_refresh(PERFORMANCE_BATCH_SIZE, min_first_at)
         if not rows:
             return
@@ -559,6 +702,40 @@ class Scanner:
                 target_price = called_price_usd * self.ctx.config.sim_target_multiple
                 if price_usd >= target_price:
                     recouped_at = now
+            post_alert_price_usd = row["post_alert_price_usd"]
+            post_alert_at = row["post_alert_at"]
+            if (
+                post_alert_price_usd is None
+                and row["eligible_first_at"]
+                and price_usd
+                and now - row["eligible_first_at"] >= self.ctx.config.sim_slippage_sample_sec
+            ):
+                post_alert_price_usd = price_usd
+                post_alert_at = now
+            above_target_started_at = row["above_target_started_at"]
+            above_target_last_at = row["above_target_last_at"]
+            above_target_total_sec = row["above_target_total_sec"] or 0
+            if called_price_usd and price_usd:
+                target_price = called_price_usd * self.ctx.config.sim_target_multiple
+                if price_usd >= target_price:
+                    if above_target_started_at is None:
+                        above_target_started_at = now
+                    above_target_last_at = now
+                else:
+                    if above_target_started_at is not None and above_target_last_at is not None:
+                        above_target_total_sec += max(
+                            0, above_target_last_at - above_target_started_at
+                        )
+                    above_target_started_at = None
+                    above_target_last_at = None
+            if (
+                recouped_at is not None
+                and row["recouped_at"] is None
+                and row["sim_taken"]
+                and row["eligible_first_at"]
+                and row["eligible_first_at"] >= sim_reset_at
+            ):
+                sim_cash += sim_position_size
 
             await self.ctx.db.update_performance_snapshot(
                 token_address=token_address,
@@ -568,7 +745,13 @@ class Scanner:
                 min_price_usd=min_price_usd,
                 max_market_cap=max_market_cap,
                 recouped_at=recouped_at,
+                post_alert_price_usd=post_alert_price_usd,
+                post_alert_at=post_alert_at,
+                above_target_started_at=above_target_started_at,
+                above_target_last_at=above_target_last_at,
+                above_target_total_sec=above_target_total_sec,
             )
+        await self.ctx.db.set_state("sim_cash", str(sim_cash))
 
     def _dedup_candidates(self, candidates: List[PairCandidate], max_count: int) -> List[PairCandidate]:
         dedup: Dict[str, PairCandidate] = {}
@@ -684,6 +867,11 @@ class Scanner:
                 min_price_usd=token_row["min_price_usd"],
                 max_market_cap=token_row["max_market_cap"],
                 recouped_at=token_row["recouped_at"],
+                post_alert_price_usd=token_row["post_alert_price_usd"],
+                post_alert_at=token_row["post_alert_at"],
+                above_target_started_at=token_row["above_target_started_at"],
+                above_target_last_at=token_row["above_target_last_at"],
+                above_target_total_sec=token_row["above_target_total_sec"],
             )
             updated_text = format_alert_message(
                 pair,
@@ -694,6 +882,11 @@ class Scanner:
                 self.ctx.config.chain_id,
                 trigger_reason,
                 self.ctx.config.alert_tagline,
+                token_row["sim_position_usd"],
+                token_row["sim_ape_pct"],
+                token_row["sim_cash_after"],
+                token_row["called_price_usd"],
+                bool(token_row["sim_taken"]) if token_row["sim_taken"] is not None else False,
                 None,
                 "",
             )
@@ -787,6 +980,11 @@ class Scanner:
                 self.ctx.config.chain_id,
                 trigger_reason,
                 self.ctx.config.alert_tagline,
+                token_row["sim_position_usd"] if token_row else None,
+                token_row["sim_ape_pct"] if token_row else None,
+                token_row["sim_cash_after"] if token_row else None,
+                token_row["called_price_usd"] if token_row else None,
+                bool(token_row["sim_taken"]) if token_row and token_row["sim_taken"] is not None else False,
                 analysis_data,
                 self.ctx.config.wallet_analysis_label,
             )

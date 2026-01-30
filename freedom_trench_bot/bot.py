@@ -6,6 +6,7 @@ import heapq
 import io
 import json
 import statistics
+from types import SimpleNamespace
 from typing import Any, Dict, Optional
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputFile, Update
@@ -31,7 +32,7 @@ from .utils import (
 )
 
 WELCOME_HEADER = "+----------------------------+\n| Freedom Trench Bot         |\n| Solana Alerts              |\n+----------------------------+"
-ALERT_HEADER = "+----------------------------+\n| Freedom Trench Bot         |\n| BECAME ELIGIBLE ✅         |\n+----------------------------+"
+ALERT_HEADER = "+----------------------------+\n| Freedom Trench Bot         |\n| APED 🚀                    |\n+----------------------------+"
 
 STARTUP_FRAMES = [
     "> initializing...",
@@ -61,9 +62,9 @@ PERFORMANCE_EXPORT_LIMIT = 50000
 HELP_TEXT = (
     "/start - onboarding and status\n"
     "/status - monitoring status and filters\n"
-    "/eligible - list currently eligible tokens\n"
     "/stats - list tokens called in the last 24h\n"
-    "/performance - simulation summary (all-time)\n"
+    "/performance - simulation summary (since reset by default)\n"
+    "/archive - archive summary before reset (all-time)\n"
     "/filters - current filters\n"
     "/health - health summary (admin only)\n"
     "/pause - pause monitoring (admin only)\n"
@@ -107,11 +108,25 @@ def build_alert_keyboard(pair: dict, token_address: str, chain_id: str) -> Inlin
 def build_status_keyboard() -> InlineKeyboardMarkup:
     buttons = [
         [
-            InlineKeyboardButton("Currently Eligible", callback_data="eligible:list"),
             InlineKeyboardButton("Settings", callback_data="settings"),
         ]
     ]
     return InlineKeyboardMarkup(buttons)
+
+
+async def get_sim_settings(ctx: AppContext):
+    return SimpleNamespace(
+        sim_start_balance=await ctx.db.get_state_float(
+            "sim_start_balance", ctx.config.sim_start_balance
+        ),
+        sim_position_size=await ctx.db.get_state_float(
+            "sim_position_size", ctx.config.sim_position_size
+        ),
+        sim_target_multiple=ctx.config.sim_target_multiple,
+        sim_buy_fee_pct=ctx.config.sim_buy_fee_pct,
+        sim_sell_fee_pct=ctx.config.sim_sell_fee_pct,
+        sim_slippage_sample_sec=ctx.config.sim_slippage_sample_sec,
+    )
 
 
 def build_trigger_reason(filters) -> str:
@@ -214,53 +229,13 @@ def _snapshot_holder_count(raw: Optional[str]) -> Optional[int]:
         return None
 
 
-def format_eligible_list(
-    rows,
-    tz_name: str,
-    retention_sec: int,
-) -> str:
-    hours = max(1, int(retention_sec / 3600))
-    header = f"<pre>{WELCOME_HEADER}</pre>"
-    if not rows:
-        return (
-            f"{header}\nCurrently eligible (last {hours}h): 0\nNo tokens currently eligible."
-        )
-
-    lines = [
-        header,
-        f"Currently eligible (last {hours}h): {len(rows)}",
-    ]
-    for idx, row in enumerate(rows, start=1):
-        token_address = row["token_address"]
-        name = escape_html(row["last_name"] or "Unknown")
-        symbol = escape_html(row["last_symbol"] or "?")
-        found_ts = row["eligible_first_at"]
-        found_snapshot = _parse_metrics_snapshot(row["eligible_first_metrics"])
-        current_snapshot = _parse_metrics_snapshot(row["last_seen_metrics"])
-        if not current_snapshot:
-            current_snapshot = found_snapshot
-
-        lines.append(f"{idx}. {name} ({symbol})")
-        lines.append(f"CA: <code>{escape_html(token_address)}</code>")
-        holders = _snapshot_holder_count(row["last_seen_metrics"])
-        if holders is None:
-            holders = _snapshot_holder_count(row["eligible_first_metrics"])
-        if holders is not None:
-            lines.append(f"Holders: {holders:,}")
-        lines.append(f"Found: {format_ts_bold_if_past(found_ts, tz_name)}")
-        lines.append(f"MCap now: {_format_mcap_from_snapshot(current_snapshot)}")
-        lines.append(f"MCap found: {_format_mcap_from_snapshot(found_snapshot)}")
-        lines.append("")
-    return "\n".join(lines).strip()
-
-
 def _format_price(value: Optional[float]) -> str:
     if value is None:
         return "n/a"
     return f"${value:,.8f}".rstrip("0").rstrip(".")
 
 
-def format_called_stats(rows, tz_name: str, retention_sec: int, limit: int, config) -> str:
+def format_called_stats(rows, tz_name: str, retention_sec: int, limit: int, sim_settings) -> str:
     hours = max(1, int(retention_sec / 3600))
     header = f"<pre>{WELCOME_HEADER}</pre>"
     if not rows:
@@ -272,13 +247,20 @@ def format_called_stats(rows, tz_name: str, retention_sec: int, limit: int, conf
         name = escape_html(row["last_name"] or "Unknown")
         symbol = escape_html(row["last_symbol"] or "?")
         called_ts = row["eligible_first_at"]
-        sim = _compute_sim_row(row, config)
+        sim = _compute_sim_row(row, sim_settings)
         entry_price = sim["entry_price"]
         current_price = sim["current_price"]
         max_multiple = sim["max_multiple"]
         min_multiple = sim["min_multiple"]
         recouped = sim["recouped"]
         recouped_at = sim["recouped_at"]
+        slippage_pct = sim["slippage_pct"]
+        above_target_total_sec = sim["above_target_total_sec"]
+        sim_taken = bool(row["sim_taken"]) if row["sim_taken"] is not None else False
+        sim_position = row["sim_position_usd"]
+        sim_ape_pct = row["sim_ape_pct"]
+        sim_cash_before = row["sim_cash_before"]
+        sim_cash_after = row["sim_cash_after"]
 
         lines.append(f"{idx}. {name} ({symbol})")
         lines.append(f"CA: <code>{escape_html(token_address)}</code>")
@@ -286,6 +268,15 @@ def format_called_stats(rows, tz_name: str, retention_sec: int, limit: int, conf
         lines.append(
             f"Entry: {_format_price(entry_price)} | Now: {_format_price(current_price)}"
         )
+        if sim_taken:
+            ape_line = f"APED: {_format_usd2(sim_position)}"
+            if sim_ape_pct is not None:
+                ape_line += f" ({sim_ape_pct:.2f}% of cash)"
+            if sim_cash_before is not None and sim_cash_after is not None:
+                ape_line += f" | cash { _format_usd2(sim_cash_before)} → {_format_usd2(sim_cash_after)}"
+            lines.append(ape_line)
+        else:
+            lines.append("APED: no (insufficient cash)")
         if max_multiple is not None:
             lines.append(f"Max multiple: {_format_multiple(max_multiple)}")
         if min_multiple is not None:
@@ -298,23 +289,14 @@ def format_called_stats(rows, tz_name: str, retention_sec: int, limit: int, conf
             lines.append(recoup_line)
         else:
             lines.append("Recoup: no")
+        if slippage_pct is not None:
+            lines.append(f"Slippage (post-alert): {format_pct(slippage_pct)}")
+        if above_target_total_sec:
+            lines.append(
+                f"Time above target: {format_duration(int(above_target_total_sec))}"
+            )
         lines.append("")
     return "\n".join(lines).strip()
-
-
-async def send_eligible_list_message(message, ctx: AppContext) -> None:
-    if message is None:
-        return
-    now = utc_now_ts()
-    rows = await ctx.db.get_currently_eligible(
-        ctx.config.eligible_list_limit, now - ctx.config.eligible_retention_sec
-    )
-    text = format_eligible_list(
-        rows,
-        ctx.config.display_timezone,
-        ctx.config.eligible_retention_sec,
-    )
-    await message.reply_text(text, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
 
 
 async def send_called_stats_message(message, ctx: AppContext) -> None:
@@ -324,12 +306,13 @@ async def send_called_stats_message(message, ctx: AppContext) -> None:
     rows = await ctx.db.get_called_since(
         ctx.config.called_list_limit, now - ctx.config.eligible_retention_sec
     )
+    sim_settings = await get_sim_settings(ctx)
     text = format_called_stats(
         rows,
         ctx.config.display_timezone,
         ctx.config.eligible_retention_sec,
         ctx.config.called_list_limit,
-        ctx.config,
+        sim_settings,
     )
     await message.reply_text(text, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
 
@@ -343,6 +326,48 @@ async def send_startup_animation(
     chat = update.effective_chat
     if chat is None:
         return
+
+
+async def send_startup_animation_to_chat(
+    bot,
+    chat_id: int,
+    frame_delay: float = 0.3,
+) -> None:
+    def wrap_pre(text: str) -> str:
+        return f"<pre>{escape_html(text)}</pre>"
+
+    try:
+        message = await bot.send_message(
+            chat_id=chat_id, text=wrap_pre(STARTUP_FRAMES[0]), parse_mode=ParseMode.HTML
+        )
+    except Exception:
+        return
+
+    try:
+        for frame in STARTUP_FRAMES[1:]:
+            await asyncio.sleep(frame_delay)
+            await bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=message.message_id,
+                text=wrap_pre(frame),
+                parse_mode=ParseMode.HTML,
+            )
+        await asyncio.sleep(frame_delay)
+        await bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=message.message_id,
+            text=wrap_pre(STARTUP_FINAL_FRAME),
+            parse_mode=ParseMode.HTML,
+        )
+    except Exception:
+        try:
+            await bot.send_message(
+                chat_id=chat_id,
+                text=wrap_pre(STARTUP_FINAL_FRAME),
+                parse_mode=ParseMode.HTML,
+            )
+        except Exception:
+            return
 
     def wrap_pre(text: str) -> str:
         return f"<pre>{escape_html(text)}</pre>"
@@ -395,6 +420,11 @@ def format_alert_message(
     chain_id: str,
     trigger_reason: str,
     tagline: str,
+    ape_amount_usd: Optional[float],
+    ape_pct: Optional[float],
+    cash_balance: Optional[float],
+    entry_price: Optional[float],
+    sim_taken: bool,
     wallet_analysis: Optional[Dict[str, Any]] = None,
     wallet_label: str = "",
 ) -> str:
@@ -430,9 +460,21 @@ def format_alert_message(
             "Chain: Solana",
             "CA:",
             ca_block,
-            f"MCap: {format_usd(metrics.market_cap_value)}{mcap_suffix}",
+            f"MCap (aped): {format_usd(metrics.market_cap_value)}{mcap_suffix}",
         ]
     )
+    if entry_price is not None:
+        lines.append(f"Ape price: {_format_price(entry_price)}")
+    if sim_taken:
+        if ape_amount_usd is not None:
+            ape_line = f"APED: {_format_usd2(ape_amount_usd)}"
+            if ape_pct is not None:
+                ape_line += f" ({ape_pct:.2f}% of cash)"
+            lines.append(ape_line)
+        if cash_balance is not None:
+            lines.append(f"Account balance (cash): {_format_usd2(cash_balance)}")
+    else:
+        lines.append("APED: no (insufficient cash)")
     if wallet_analysis:
         label = wallet_label or "Top Wallet Call"
         lines.extend(format_wallet_analysis_block(wallet_analysis, label, tz_name))
@@ -537,6 +579,12 @@ def _compute_sim_row(row, config) -> Dict[str, Any]:
         recouped = True
     if recouped_at:
         recouped = True
+    post_alert_price = row["post_alert_price_usd"]
+    post_alert_at = row["post_alert_at"]
+    slippage_pct = None
+    if entry_price and post_alert_price and entry_price > 0:
+        slippage_pct = ((post_alert_price / entry_price) - 1.0) * 100.0
+    above_target_total_sec = row["above_target_total_sec"] or 0
 
     buy_fee = max(0.0, config.sim_buy_fee_pct) / 100.0
     sell_fee = max(0.0, config.sim_sell_fee_pct) / 100.0
@@ -585,6 +633,10 @@ def _compute_sim_row(row, config) -> Dict[str, Any]:
         "target_price": target_price,
         "recouped": recouped,
         "recouped_at": recouped_at,
+        "post_alert_price": post_alert_price,
+        "post_alert_at": post_alert_at,
+        "slippage_pct": slippage_pct,
+        "above_target_total_sec": above_target_total_sec,
         "recoup_possible": recoup_possible,
         "tokens_bought": tokens_bought,
         "moonbag_tokens": moonbag_tokens,
@@ -598,7 +650,7 @@ def format_performance_summary(
     window_label: str,
     total_calls: int,
     limit: int,
-    config,
+    sim_settings,
     reset_at: int,
 ) -> str:
     header = f"<pre>{WELCOME_HEADER}</pre>"
@@ -610,8 +662,8 @@ def format_performance_summary(
     rows_sorted = sorted(rows, key=lambda item: item["eligible_first_at"] or 0)
     effective_reset = reset_at or 0
 
-    cash = config.sim_start_balance
-    position_size = config.sim_position_size
+    cash = sim_settings.sim_start_balance
+    position_size = sim_settings.sim_position_size
     recoup_heap: list[int] = []
     taken_flags: Dict[str, bool] = {}
     taken_count = 0
@@ -626,15 +678,27 @@ def format_performance_summary(
             heapq.heappop(recoup_heap)
             cash += position_size
             recouped_cash_count += 1
-        if cash >= position_size:
-            taken_flags[row["token_address"]] = True
-            cash -= position_size
-            taken_count += 1
-            if row["recouped_at"]:
-                heapq.heappush(recoup_heap, row["recouped_at"])
+        sim_taken_value = row["sim_taken"]
+        if sim_taken_value is not None:
+            taken = bool(sim_taken_value)
+            taken_flags[row["token_address"]] = taken
+            if taken:
+                cash -= position_size
+                taken_count += 1
+                if row["recouped_at"]:
+                    heapq.heappush(recoup_heap, row["recouped_at"])
+            else:
+                skipped_count += 1
         else:
-            taken_flags[row["token_address"]] = False
-            skipped_count += 1
+            if cash >= position_size:
+                taken_flags[row["token_address"]] = True
+                cash -= position_size
+                taken_count += 1
+                if row["recouped_at"]:
+                    heapq.heappush(recoup_heap, row["recouped_at"])
+            else:
+                taken_flags[row["token_address"]] = False
+                skipped_count += 1
 
     while recoup_heap and recoup_heap[0] <= now:
         heapq.heappop(recoup_heap)
@@ -649,6 +713,9 @@ def format_performance_summary(
     multiples: list[float] = []
     min_multiples: list[float] = []
     winners: list[tuple[float, Any]] = []
+    recoup_times: list[int] = []
+    above_target_times: list[int] = []
+    slippage_samples: list[float] = []
     moonbag_10x = 0
     moonbag_100x = 0
     moonbag_1000x = 0
@@ -659,7 +726,7 @@ def format_performance_summary(
             continue
         if taken_flags.get(row["token_address"]) is False:
             continue
-        sim = _compute_sim_row(row, config)
+        sim = _compute_sim_row(row, sim_settings)
         entry_price = sim["entry_price"]
         if entry_price:
             tracked += 1
@@ -672,6 +739,8 @@ def format_performance_summary(
             min_multiples.append(min_multiple)
         if sim["recouped"]:
             recouped += 1
+            if row["eligible_first_at"] and row["recouped_at"]:
+                recoup_times.append(row["recouped_at"] - row["eligible_first_at"])
             if max_multiple is not None:
                 if max_multiple >= 10.0:
                     moonbag_10x += 1
@@ -682,6 +751,10 @@ def format_performance_summary(
         else:
             if sim["recoup_possible"] is False:
                 recoup_possible_misses += 1
+        if sim["above_target_total_sec"]:
+            above_target_times.append(int(sim["above_target_total_sec"]))
+        if sim["slippage_pct"] is not None:
+            slippage_samples.append(sim["slippage_pct"])
 
         if taken_flags.get(row["token_address"]):
             current_value = sim["current_value"]
@@ -692,8 +765,9 @@ def format_performance_summary(
         header,
         f"Simulation ({window_label})",
         f"Signals: {total_calls}, tracked: {tracked}",
-        f"Sim start: {_format_usd2(config.sim_start_balance)} | position: {_format_usd2(position_size)}",
-        f"Target: {config.sim_target_multiple:.2f}x | fees: buy {config.sim_buy_fee_pct:.2f}% / sell {config.sim_sell_fee_pct:.2f}%",
+        f"Sim start: {_format_usd2(sim_settings.sim_start_balance)} | position: {_format_usd2(position_size)}",
+        f"Target: {sim_settings.sim_target_multiple:.2f}x | fees: buy {sim_settings.sim_buy_fee_pct:.2f}% / sell {sim_settings.sim_sell_fee_pct:.2f}%",
+        f"Slippage sample: {sim_settings.sim_slippage_sample_sec}s post-alert",
         f"Taken: {taken_count}, skipped: {skipped_count}, open: {open_positions}",
         f"Recouped: {recouped} ({_format_ratio(recouped / tracked) if tracked else 'n/a'})",
         f"Cash: {_format_usd2(cash)} | Equity: {_format_usd2(equity)}",
@@ -706,10 +780,19 @@ def format_performance_summary(
     if tracked > 0:
         median_multiple = statistics.median(multiples) if multiples else None
         median_min = statistics.median(min_multiples) if min_multiples else None
+        median_recoup = statistics.median(recoup_times) if recoup_times else None
+        median_above = statistics.median(above_target_times) if above_target_times else None
+        median_slip = statistics.median(slippage_samples) if slippage_samples else None
         if median_multiple is not None:
             lines.append(f"Median max multiple: {_format_multiple(median_multiple)}")
         if median_min is not None:
             lines.append(f"Median min multiple: {_format_multiple(median_min)}")
+        if median_recoup is not None:
+            lines.append(f"Median time to recoup: {format_duration(int(median_recoup))}")
+        if median_above is not None:
+            lines.append(f"Median time above target: {format_duration(int(median_above))}")
+        if median_slip is not None:
+            lines.append(f"Median slippage (post-alert): {format_pct(median_slip)}")
         lines.append(
             f"Moonbags: 10x {moonbag_10x} | 100x {moonbag_100x} | 1000x {moonbag_1000x}"
         )
@@ -731,7 +814,7 @@ def format_performance_summary(
         sample_count = min(10, len(rows))
         lines.append(f"Recent sample (last {sample_count}):")
         for idx, row in enumerate(rows[:sample_count], start=1):
-            sim = _compute_sim_row(row, config)
+            sim = _compute_sim_row(row, sim_settings)
             name = escape_html(row["last_name"] or "Unknown")
             symbol = escape_html(row["last_symbol"] or "?")
             status = "recouped" if sim["recouped"] else "open"
@@ -759,7 +842,49 @@ def format_performance_summary(
     return "\n".join(lines)
 
 
-def build_performance_csv(rows, tz_name: str, config) -> bytes:
+def format_archive_summary(
+    rows,
+    tz_name: str,
+    window_label: str,
+    total_calls: int,
+    limit: int,
+) -> str:
+    header = f"<pre>{WELCOME_HEADER}</pre>"
+    shown = len(rows)
+    if total_calls == 0:
+        return f"{header}\nArchive ({window_label}): 0\nNo archived calls."
+
+    tracked = 0
+    multiples: list[float] = []
+    winners: list[tuple[float, Any]] = []
+    for row in rows:
+        called_price = row["called_price_usd"]
+        max_price = row["max_price_usd"]
+        if called_price and max_price and called_price > 0:
+            tracked += 1
+            multiple = max_price / called_price
+            multiples.append(multiple)
+            winners.append((multiple, row))
+
+    lines = [header, f"Archive ({window_label})", f"Calls: {total_calls}, tracked: {tracked}"]
+    if total_calls > shown:
+        lines.append(f"Showing: {shown} most recent (sample)")
+    if tracked > 0:
+        lines.append(f"Median max multiple: {_format_multiple(statistics.median(multiples))}")
+        winners.sort(key=lambda item: item[0], reverse=True)
+        lines.append(f"Top {min(PERFORMANCE_TOP_N, len(winners))} winners:")
+        for idx, (multiple, row) in enumerate(winners[:PERFORMANCE_TOP_N], start=1):
+            name = escape_html(row["last_name"] or "Unknown")
+            symbol = escape_html(row["last_symbol"] or "?")
+            lines.append(f"{idx}. {name} ({symbol}) {multiple:.2f}x")
+    else:
+        lines.append("Tracked: n/a (waiting for price updates)")
+
+    lines.append("Note: archive is pre-reset data only.")
+    return "\n".join(lines)
+
+
+def build_performance_csv(rows, tz_name: str, sim_settings) -> bytes:
     output = io.StringIO()
     writer = csv.writer(output)
     writer.writerow(
@@ -776,10 +901,14 @@ def build_performance_csv(rows, tz_name: str, config) -> bytes:
             "max_multiple",
             "min_multiple",
             "recouped_at",
+            "post_alert_price_usd",
+            "post_alert_at",
+            "slippage_pct",
+            "above_target_total_sec",
         ]
     )
     for row in rows:
-        sim = _compute_sim_row(row, config)
+        sim = _compute_sim_row(row, sim_settings)
         entry_price = sim["entry_price"]
         current_price = sim["current_price"]
         max_price = row["max_price_usd"]
@@ -787,6 +916,8 @@ def build_performance_csv(rows, tz_name: str, config) -> bytes:
         current_multiple = sim["current_multiple"]
         max_multiple = sim["max_multiple"]
         min_multiple = sim["min_multiple"]
+        slippage_pct = sim["slippage_pct"]
+        above_target_total_sec = sim["above_target_total_sec"]
         writer.writerow(
             [
                 row["token_address"],
@@ -801,6 +932,10 @@ def build_performance_csv(rows, tz_name: str, config) -> bytes:
                 f"{max_multiple:.2f}" if max_multiple is not None else "",
                 f"{min_multiple:.2f}" if min_multiple is not None else "",
                 format_ts(row["recouped_at"], tz_name),
+                row["post_alert_price_usd"] if row["post_alert_price_usd"] is not None else "",
+                format_ts(row["post_alert_at"], tz_name),
+                f"{slippage_pct:.2f}" if slippage_pct is not None else "",
+                above_target_total_sec if above_target_total_sec else "",
             ]
         )
     return output.getvalue().encode("utf-8")
@@ -836,6 +971,8 @@ def format_status(
     api_requests: int,
     rate_limited: int,
     median_lag_sec: int,
+    sim_cash: float,
+    sim_settings,
 ) -> str:
     now = utc_now_ts()
     mute_active = mute_until and mute_until > now
@@ -856,11 +993,13 @@ def format_status(
         f"Median alert lag: {format_duration(median_lag_sec)}",
         (
             "Sim: start "
-            f"{_format_usd2(ctx.config.sim_start_balance)}, "
-            f"pos {_format_usd2(ctx.config.sim_position_size)}, "
-            f"target {ctx.config.sim_target_multiple:.2f}x, "
-            f"fees {ctx.config.sim_buy_fee_pct:.2f}%/{ctx.config.sim_sell_fee_pct:.2f}%"
+            f"{_format_usd2(sim_settings.sim_start_balance)}, "
+            f"pos {_format_usd2(sim_settings.sim_position_size)}, "
+            f"target {sim_settings.sim_target_multiple:.2f}x, "
+            f"fees {sim_settings.sim_buy_fee_pct:.2f}%/{sim_settings.sim_sell_fee_pct:.2f}%, "
+            f"slip {sim_settings.sim_slippage_sample_sec}s"
         ),
+        f"Sim cash: {_format_usd2(sim_cash)}",
         "Filters:",
         format_filters(ctx),
     ]
@@ -905,10 +1044,34 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     await send_startup_animation(update, context, ctx)
 
+    sim_settings = await get_sim_settings(ctx)
+    sim_cash = await ctx.db.get_state_float("sim_cash", sim_settings.sim_start_balance)
+    balance_buttons = [
+        InlineKeyboardButton("$25", callback_data="sim:balance:25"),
+        InlineKeyboardButton("$50", callback_data="sim:balance:50"),
+        InlineKeyboardButton("$100", callback_data="sim:balance:100"),
+        InlineKeyboardButton("$200", callback_data="sim:balance:200"),
+    ]
+    position_buttons = [
+        InlineKeyboardButton("$0.5", callback_data="sim:position:0.5"),
+        InlineKeyboardButton("$1", callback_data="sim:position:1"),
+        InlineKeyboardButton("$2", callback_data="sim:position:2"),
+        InlineKeyboardButton("$5", callback_data="sim:position:5"),
+    ]
+    keyboard = InlineKeyboardMarkup([balance_buttons, position_buttons, [InlineKeyboardButton("Start Sim", callback_data="sim:confirm")]])
+    sim_text = (
+        "Simulation setup\n"
+        f"• Balance: {_format_usd2(sim_settings.sim_start_balance)}\n"
+        f"• Position: {_format_usd2(sim_settings.sim_position_size)}\n"
+        f"• Target: {sim_settings.sim_target_multiple:.2f}x\n"
+        f"• Fees: {sim_settings.sim_buy_fee_pct:.2f}% / {sim_settings.sim_sell_fee_pct:.2f}%\n"
+        f"• Cash now: {_format_usd2(sim_cash)}"
+    )
+
     status_lines = [
         "STATUS",
         "• Chain: Solana",
-        "• Mode: Eligible List",
+        "• Mode: Auto Ape Simulation",
         f"• Scan Interval: {ctx.config.scan_interval_sec}s",
         "• Alerts: ENABLED",
     ]
@@ -916,9 +1079,17 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     if update.effective_message:
         await update.effective_message.reply_text(
+            sim_text, reply_markup=keyboard
+        )
+        await update.effective_message.reply_text(
             status_text, reply_markup=build_status_keyboard()
         )
     elif update.effective_chat:
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=sim_text,
+            reply_markup=keyboard,
+        )
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
             text=status_text,
@@ -963,6 +1134,8 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     api_requests = await ctx.db.get_state_int("metrics_api_requests", 0)
     rate_limited = await ctx.db.get_state_int("metrics_rate_limited_count", 0)
     median_lag_sec = await ctx.db.get_state_int("metrics_alert_lag_median_sec", 0)
+    sim_cash = await ctx.db.get_state_float("sim_cash", ctx.config.sim_start_balance)
+    sim_settings = await get_sim_settings(ctx)
 
     status = format_status(
         ctx,
@@ -979,6 +1152,8 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         api_requests,
         rate_limited,
         median_lag_sec,
+        sim_cash,
+        sim_settings,
     )
     lines = [f"<pre>{WELCOME_HEADER}</pre>", status]
     await update.effective_message.reply_text(
@@ -986,15 +1161,6 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         parse_mode=ParseMode.HTML,
         reply_markup=build_status_keyboard(),
     )
-
-
-async def cmd_eligible(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    ctx = get_app_ctx(context)
-    if ctx is None:
-        await update.effective_message.reply_text("Bot is starting, try again in a moment.")
-        return
-    await send_eligible_list_message(update.effective_message, ctx)
-
 
 async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     ctx = get_app_ctx(context)
@@ -1013,6 +1179,9 @@ async def cmd_performance(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     min_first_at = None
     window_label = "all-time"
     export = False
+    reset_at = await ctx.db.get_state_int("sim_reset_at", 0)
+    if not context.args and reset_at:
+        window_label = "since reset"
     if context.args:
         for raw in context.args:
             arg = raw.strip().lower()
@@ -1035,20 +1204,20 @@ async def cmd_performance(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             else:
                 window_label = f"last {format_duration(duration)}"
 
-    reset_at = await ctx.db.get_state_int("sim_reset_at", 0)
     effective_min = min_first_at
     if reset_at and (effective_min is None or reset_at > effective_min):
         effective_min = reset_at
     total_calls = await ctx.db.count_called_since(effective_min)
     limit = PERFORMANCE_EXPORT_LIMIT if export else PERFORMANCE_SUMMARY_LIMIT
     rows = await ctx.db.get_called_for_performance(limit, effective_min)
+    sim_settings = await get_sim_settings(ctx)
     text = format_performance_summary(
         rows,
         ctx.config.display_timezone,
         window_label,
         total_calls,
         limit,
-        ctx.config,
+        sim_settings,
         reset_at,
     )
     await update.effective_message.reply_text(
@@ -1057,12 +1226,64 @@ async def cmd_performance(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         disable_web_page_preview=True,
     )
     if export and rows:
-        csv_bytes = build_performance_csv(rows, ctx.config.display_timezone, ctx.config)
+        csv_bytes = build_performance_csv(rows, ctx.config.display_timezone, sim_settings)
         filename = f"performance_{window_label.replace(' ', '_')}.csv"
         await update.effective_message.reply_document(
             document=InputFile(io.BytesIO(csv_bytes), filename=filename),
-            caption=f"Performance export ({window_label})",
+            caption=f"Simulation export ({window_label})",
         )
+
+
+async def cmd_archive(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    ctx = get_app_ctx(context)
+    if ctx is None:
+        await update.effective_message.reply_text("Bot is starting, try again in a moment.")
+        return
+    now = utc_now_ts()
+    max_first_at = await ctx.db.get_state_int("sim_reset_at", 0)
+    if max_first_at == 0:
+        max_first_at = now
+    window_label = "before reset"
+    min_first_at: Optional[int] = None
+    if context.args:
+        for raw in context.args:
+            arg = raw.strip().lower()
+            if arg in ("all", "alltime", "all-time"):
+                window_label = "before reset"
+                continue
+            duration = parse_duration(arg)
+            if duration is None:
+                await update.effective_message.reply_text(
+                    "Usage: /archive [7d|30d|all]"
+                )
+                return
+            window_label = (
+                f"last {duration // 86400}d"
+                if duration % 86400 == 0
+                else f"last {format_duration(duration)}"
+            )
+            min_first_at = max(0, max_first_at - duration)
+
+    if min_first_at is not None:
+        total_calls = await ctx.db.count_called_between(min_first_at, max_first_at)
+    else:
+        total_calls = await ctx.db.count_called_before(max_first_at)
+    limit = PERFORMANCE_SUMMARY_LIMIT
+    rows = await ctx.db.get_called_before(limit, max_first_at)
+    if min_first_at is not None:
+        rows = [row for row in rows if (row["eligible_first_at"] or 0) >= min_first_at]
+    text = format_archive_summary(
+        rows,
+        ctx.config.display_timezone,
+        window_label,
+        total_calls,
+        limit,
+    )
+    await update.effective_message.reply_text(
+        text,
+        parse_mode=ParseMode.HTML,
+        disable_web_page_preview=True,
+    )
 
 
 async def cmd_health(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1152,6 +1373,7 @@ async def cmd_reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     reset_at = utc_now_ts()
     await ctx.db.set_state("sim_reset_at", str(reset_at))
+    await ctx.db.set_state("sim_cash", str(ctx.config.sim_start_balance))
     await update.effective_message.reply_text(
         f"Simulation reset at {format_ts(reset_at, ctx.config.display_timezone)}"
     )
@@ -1207,9 +1429,35 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         )
         return
 
-    if data == "eligible:list":
-        await send_eligible_list_message(query.message, ctx)
-        return
+    if data.startswith("sim:"):
+        if not await is_admin(update, context, ctx):
+            await query.answer("Admin only", show_alert=True)
+            return
+        parts = data.split(":")
+        if len(parts) >= 3 and parts[1] in ("balance", "position"):
+            try:
+                value = float(parts[2])
+            except ValueError:
+                await query.message.reply_text("Invalid value.")
+                return
+            if parts[1] == "balance":
+                await ctx.db.set_state("sim_start_balance", str(value))
+                await ctx.db.set_state("sim_cash", str(value))
+            else:
+                await ctx.db.set_state("sim_position_size", str(value))
+            await query.message.reply_text(
+                f"Simulation {parts[1]} set to {_format_usd2(value)}."
+            )
+            return
+        if len(parts) >= 2 and parts[1] == "confirm":
+            reset_at = utc_now_ts()
+            sim_settings = await get_sim_settings(ctx)
+            await ctx.db.set_state("sim_reset_at", str(reset_at))
+            await ctx.db.set_state("sim_cash", str(sim_settings.sim_start_balance))
+            await query.message.reply_text(
+                f"Simulation started at {format_ts(reset_at, ctx.config.display_timezone)}"
+            )
+            return
 
     if data == "settings":
         await query.message.reply_text(
@@ -1229,9 +1477,9 @@ def register_handlers(application: Application) -> None:
     application.add_handler(CommandHandler("start", cmd_start))
     application.add_handler(CommandHandler("help", cmd_help))
     application.add_handler(CommandHandler("status", cmd_status))
-    application.add_handler(CommandHandler("eligible", cmd_eligible))
     application.add_handler(CommandHandler("stats", cmd_stats))
     application.add_handler(CommandHandler("performance", cmd_performance))
+    application.add_handler(CommandHandler("archive", cmd_archive))
     application.add_handler(CommandHandler("filters", cmd_filters))
     application.add_handler(CommandHandler("health", cmd_health))
     application.add_handler(CommandHandler("pause", cmd_pause))
