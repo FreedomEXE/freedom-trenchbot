@@ -49,6 +49,11 @@ class Config:
     helius_api_key: str
     holder_count_enabled: bool
     holder_count_min: int
+    sim_start_balance: float
+    sim_position_size: float
+    sim_target_multiple: float
+    sim_buy_fee_pct: float
+    sim_sell_fee_pct: float
 
     dex_max_rps: int
     dex_max_concurrency: int
@@ -115,6 +120,11 @@ def load_config() -> Config:
     helius_api_key = os.getenv("HELIUS_API_KEY", "").strip()
     holder_count_enabled = parse_bool(os.getenv("HOLDER_COUNT_ENABLED", "true"), True)
     holder_count_min = int(os.getenv("HOLDER_COUNT_MIN", "100"))
+    sim_start_balance = float(os.getenv("SIM_START_BALANCE", "100"))
+    sim_position_size = float(os.getenv("SIM_POSITION_SIZE", "1"))
+    sim_target_multiple = float(os.getenv("SIM_TARGET_MULTIPLE", "1.3"))
+    sim_buy_fee_pct = float(os.getenv("SIM_BUY_FEE_PCT", "1.0"))
+    sim_sell_fee_pct = float(os.getenv("SIM_SELL_FEE_PCT", "1.0"))
 
     dex_max_rps = int(os.getenv("DEX_MAX_RPS", "5"))
     dex_max_concurrency = int(os.getenv("DEX_MAX_CONCURRENCY", "2"))
@@ -173,6 +183,11 @@ def load_config() -> Config:
         helius_api_key=helius_api_key,
         holder_count_enabled=holder_count_enabled,
         holder_count_min=holder_count_min,
+        sim_start_balance=sim_start_balance,
+        sim_position_size=sim_position_size,
+        sim_target_multiple=sim_target_multiple,
+        sim_buy_fee_pct=sim_buy_fee_pct,
+        sim_sell_fee_pct=sim_sell_fee_pct,
         dex_max_rps=dex_max_rps,
         dex_max_concurrency=dex_max_concurrency,
         dex_timeout_sec=dex_timeout_sec,

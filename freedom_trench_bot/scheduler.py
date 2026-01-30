@@ -342,9 +342,12 @@ class Scanner:
                 called_price_usd = price_usd
 
             max_price_usd = token_row["max_price_usd"]
+            min_price_usd = token_row["min_price_usd"]
             if eligible_first_at and price_usd is not None:
                 if max_price_usd is None or price_usd > max_price_usd:
                     max_price_usd = price_usd
+                if min_price_usd is None or price_usd < min_price_usd:
+                    min_price_usd = price_usd
 
             max_market_cap = token_row["max_market_cap"]
             if eligible_first_at and market_cap_value is not None:
@@ -358,17 +361,16 @@ class Scanner:
             else:
                 last_ineligible_at = now
 
-            hit_2x_at = token_row["hit_2x_at"]
-            hit_3x_at = token_row["hit_3x_at"]
-            hit_5x_at = token_row["hit_5x_at"]
-            if called_price_usd and price_usd and called_price_usd > 0:
-                multiple = price_usd / called_price_usd
-                if hit_2x_at is None and multiple >= 2.0:
-                    hit_2x_at = now
-                if hit_3x_at is None and multiple >= 3.0:
-                    hit_3x_at = now
-                if hit_5x_at is None and multiple >= 5.0:
-                    hit_5x_at = now
+            recouped_at = token_row["recouped_at"]
+            if (
+                recouped_at is None
+                and called_price_usd
+                and price_usd
+                and called_price_usd > 0
+            ):
+                target_price = called_price_usd * config.sim_target_multiple
+                if price_usd >= target_price:
+                    recouped_at = now
 
             await db.update_token_state(
                 token_address=token_address,
@@ -383,10 +385,9 @@ class Scanner:
                 last_symbol=symbol,
                 called_price_usd=called_price_usd,
                 max_price_usd=max_price_usd,
+                min_price_usd=min_price_usd,
                 max_market_cap=max_market_cap,
-                hit_2x_at=hit_2x_at,
-                hit_3x_at=hit_3x_at,
-                hit_5x_at=hit_5x_at,
+                recouped_at=recouped_at,
             )
             await db.update_pair_checked(
                 primary_candidate.pair_address,
@@ -480,18 +481,33 @@ class Scanner:
                     if called_price is None:
                         continue
                     max_price = row["max_price_usd"] or called_price
+                    min_price = row["min_price_usd"] or called_price
                     last_price = _snapshot_price(row["last_seen_metrics"])
                     if last_price is not None and last_price > max_price:
                         max_price = last_price
+                    if last_price is not None and last_price < min_price:
+                        min_price = last_price
                     max_market_cap = row["max_market_cap"]
                     snapshot_mcap = _snapshot_mcap(row["eligible_first_metrics"])
                     if max_market_cap is None:
                         max_market_cap = snapshot_mcap
+                    recouped_at = row["recouped_at"]
+                    if (
+                        recouped_at is None
+                        and called_price
+                        and last_price
+                        and called_price > 0
+                    ):
+                        target_price = called_price * self.ctx.config.sim_target_multiple
+                        if last_price >= target_price:
+                            recouped_at = utc_now_ts()
                     await self.ctx.db.update_called_prices(
                         token_address=token_address,
                         called_price_usd=called_price,
                         max_price_usd=max_price,
+                        min_price_usd=min_price,
                         max_market_cap=max_market_cap,
+                        recouped_at=recouped_at,
                     )
                     updated += 1
                 if updated == 0:
@@ -523,35 +539,35 @@ class Scanner:
             price_usd = _to_float(pair.get("priceUsd"))
             called_price_usd = row["called_price_usd"]
             max_price_usd = row["max_price_usd"]
+            min_price_usd = row["min_price_usd"]
             if price_usd is not None:
                 if max_price_usd is None or price_usd > max_price_usd:
                     max_price_usd = price_usd
+                if min_price_usd is None or price_usd < min_price_usd:
+                    min_price_usd = price_usd
             max_market_cap = row["max_market_cap"]
             if metrics.market_cap_value is not None:
                 if max_market_cap is None or metrics.market_cap_value > max_market_cap:
                     max_market_cap = metrics.market_cap_value
-
-            hit_2x_at = row["hit_2x_at"]
-            hit_3x_at = row["hit_3x_at"]
-            hit_5x_at = row["hit_5x_at"]
-            if called_price_usd and price_usd and called_price_usd > 0:
-                multiple = price_usd / called_price_usd
-                if hit_2x_at is None and multiple >= 2.0:
-                    hit_2x_at = now
-                if hit_3x_at is None and multiple >= 3.0:
-                    hit_3x_at = now
-                if hit_5x_at is None and multiple >= 5.0:
-                    hit_5x_at = now
+            recouped_at = row["recouped_at"]
+            if (
+                recouped_at is None
+                and called_price_usd
+                and price_usd
+                and called_price_usd > 0
+            ):
+                target_price = called_price_usd * self.ctx.config.sim_target_multiple
+                if price_usd >= target_price:
+                    recouped_at = now
 
             await self.ctx.db.update_performance_snapshot(
                 token_address=token_address,
                 last_seen_metrics=last_seen_metrics,
                 last_checked_at=now,
                 max_price_usd=max_price_usd,
+                min_price_usd=min_price_usd,
                 max_market_cap=max_market_cap,
-                hit_2x_at=hit_2x_at,
-                hit_3x_at=hit_3x_at,
-                hit_5x_at=hit_5x_at,
+                recouped_at=recouped_at,
             )
 
     def _dedup_candidates(self, candidates: List[PairCandidate], max_count: int) -> List[PairCandidate]:
@@ -665,10 +681,9 @@ class Scanner:
                 last_symbol=token_row["last_symbol"],
                 called_price_usd=token_row["called_price_usd"],
                 max_price_usd=token_row["max_price_usd"],
+                min_price_usd=token_row["min_price_usd"],
                 max_market_cap=token_row["max_market_cap"],
-                hit_2x_at=token_row["hit_2x_at"],
-                hit_3x_at=token_row["hit_3x_at"],
-                hit_5x_at=token_row["hit_5x_at"],
+                recouped_at=token_row["recouped_at"],
             )
             updated_text = format_alert_message(
                 pair,

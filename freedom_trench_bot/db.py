@@ -41,6 +41,7 @@ class Database:
                 last_symbol TEXT,
                 called_price_usd REAL,
                 max_price_usd REAL,
+                min_price_usd REAL,
                 max_market_cap REAL,
                 wallet_analysis_at INTEGER,
                 wallet_analysis_json TEXT,
@@ -51,7 +52,8 @@ class Database:
                 intent_json TEXT,
                 hit_2x_at INTEGER,
                 hit_3x_at INTEGER,
-                hit_5x_at INTEGER
+                hit_5x_at INTEGER,
+                recouped_at INTEGER
             )
             """
         )
@@ -69,6 +71,7 @@ class Database:
         await self._ensure_column("tokens", "last_symbol", "TEXT")
         await self._ensure_column("tokens", "called_price_usd", "REAL")
         await self._ensure_column("tokens", "max_price_usd", "REAL")
+        await self._ensure_column("tokens", "min_price_usd", "REAL")
         await self._ensure_column("tokens", "max_market_cap", "REAL")
         await self._ensure_column("tokens", "wallet_analysis_at", "INTEGER")
         await self._ensure_column("tokens", "wallet_analysis_json", "TEXT")
@@ -80,6 +83,7 @@ class Database:
         await self._ensure_column("tokens", "hit_2x_at", "INTEGER")
         await self._ensure_column("tokens", "hit_3x_at", "INTEGER")
         await self._ensure_column("tokens", "hit_5x_at", "INTEGER")
+        await self._ensure_column("tokens", "recouped_at", "INTEGER")
         await self._migrate_token_timestamps()
         await self.conn.execute(
             """
@@ -195,10 +199,9 @@ class Database:
         last_symbol: Optional[str],
         called_price_usd: Optional[float],
         max_price_usd: Optional[float],
+        min_price_usd: Optional[float],
         max_market_cap: Optional[float],
-        hit_2x_at: Optional[int],
-        hit_3x_at: Optional[int],
-        hit_5x_at: Optional[int],
+        recouped_at: Optional[int],
     ) -> None:
         assert self.conn is not None
         await self.conn.execute(
@@ -215,10 +218,9 @@ class Database:
                 last_symbol = ?,
                 called_price_usd = ?,
                 max_price_usd = ?,
+                min_price_usd = ?,
                 max_market_cap = ?,
-                hit_2x_at = ?,
-                hit_3x_at = ?,
-                hit_5x_at = ?
+                recouped_at = ?
             WHERE token_address = ?
             """,
             (
@@ -233,10 +235,9 @@ class Database:
                 last_symbol,
                 called_price_usd,
                 max_price_usd,
+                min_price_usd,
                 max_market_cap,
-                hit_2x_at,
-                hit_3x_at,
-                hit_5x_at,
+                recouped_at,
                 token_address,
             ),
         )
@@ -289,7 +290,7 @@ class Database:
         cur = await self.conn.execute(
             """
             SELECT token_address, eligible_first_metrics, last_seen_metrics,
-                   called_price_usd, max_price_usd, max_market_cap
+                   called_price_usd, max_price_usd, min_price_usd, max_market_cap, recouped_at
             FROM tokens
             WHERE eligible_first_at IS NOT NULL
               AND called_price_usd IS NULL
@@ -306,7 +307,9 @@ class Database:
         token_address: str,
         called_price_usd: Optional[float],
         max_price_usd: Optional[float],
+        min_price_usd: Optional[float],
         max_market_cap: Optional[float],
+        recouped_at: Optional[int],
     ) -> None:
         assert self.conn is not None
         await self.conn.execute(
@@ -314,10 +317,12 @@ class Database:
             UPDATE tokens
             SET called_price_usd = ?,
                 max_price_usd = ?,
-                max_market_cap = ?
+                min_price_usd = ?,
+                max_market_cap = ?,
+                recouped_at = ?
             WHERE token_address = ?
             """,
-            (called_price_usd, max_price_usd, max_market_cap, token_address),
+            (called_price_usd, max_price_usd, min_price_usd, max_market_cap, recouped_at, token_address),
         )
         await self.conn.commit()
 
@@ -329,9 +334,8 @@ class Database:
             cur = await self.conn.execute(
                 """
                 SELECT token_address, eligible_first_at, last_name, last_symbol,
-                       called_price_usd, max_price_usd,
-                       last_seen_metrics, eligible_first_metrics,
-                       hit_2x_at, hit_3x_at, hit_5x_at
+                       called_price_usd, max_price_usd, min_price_usd,
+                       last_seen_metrics, eligible_first_metrics, recouped_at
                 FROM tokens
                 WHERE eligible_first_at IS NOT NULL
                 ORDER BY eligible_first_at DESC
@@ -343,9 +347,8 @@ class Database:
             cur = await self.conn.execute(
                 """
                 SELECT token_address, eligible_first_at, last_name, last_symbol,
-                       called_price_usd, max_price_usd,
-                       last_seen_metrics, eligible_first_metrics,
-                       hit_2x_at, hit_3x_at, hit_5x_at
+                       called_price_usd, max_price_usd, min_price_usd,
+                       last_seen_metrics, eligible_first_metrics, recouped_at
                 FROM tokens
                 WHERE eligible_first_at IS NOT NULL
                   AND eligible_first_at >= ?
@@ -385,8 +388,8 @@ class Database:
         cur = await self.conn.execute(
             """
             SELECT token_address, eligible_first_metrics, last_seen_metrics,
-                   called_price_usd, max_price_usd, max_market_cap,
-                   hit_2x_at, hit_3x_at, hit_5x_at
+                   called_price_usd, max_price_usd, min_price_usd, max_market_cap,
+                   recouped_at
             FROM tokens
             WHERE eligible_first_at IS NOT NULL
               AND eligible_first_at >= ?
@@ -405,10 +408,9 @@ class Database:
         last_seen_metrics: Optional[str],
         last_checked_at: int,
         max_price_usd: Optional[float],
+        min_price_usd: Optional[float],
         max_market_cap: Optional[float],
-        hit_2x_at: Optional[int],
-        hit_3x_at: Optional[int],
-        hit_5x_at: Optional[int],
+        recouped_at: Optional[int],
     ) -> None:
         assert self.conn is not None
         await self.conn.execute(
@@ -417,20 +419,18 @@ class Database:
             SET last_seen_metrics = ?,
                 last_checked_at = ?,
                 max_price_usd = ?,
+                min_price_usd = ?,
                 max_market_cap = ?,
-                hit_2x_at = ?,
-                hit_3x_at = ?,
-                hit_5x_at = ?
+                recouped_at = ?
             WHERE token_address = ?
             """,
             (
                 last_seen_metrics,
                 last_checked_at,
                 max_price_usd,
+                min_price_usd,
                 max_market_cap,
-                hit_2x_at,
-                hit_3x_at,
-                hit_5x_at,
+                recouped_at,
                 token_address,
             ),
         )
@@ -565,7 +565,7 @@ class Database:
             """
             SELECT token_address, eligible_first_at, eligible_first_metrics,
                    last_seen_metrics, last_name, last_symbol,
-                   called_price_usd, max_price_usd, max_market_cap
+                   called_price_usd, max_price_usd, min_price_usd, max_market_cap, recouped_at
             FROM tokens
             WHERE eligible_first_at IS NOT NULL
               AND eligible_first_at >= ?

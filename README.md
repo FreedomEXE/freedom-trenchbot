@@ -67,17 +67,20 @@ Set `DRY_RUN=true` to log would-alert tokens without posting to Telegram.
 - `CALLED_LIST_LIMIT` (max items in `/stats`)
 - `ALERT_TAGLINE` (custom line shown in alert messages)
 - `HOLDER_COUNT_ENABLED` and `HOLDER_COUNT_MIN` (optional holder-count lookups; requires `HELIUS_API_KEY`)
+- `SIM_START_BALANCE`, `SIM_POSITION_SIZE`, `SIM_TARGET_MULTIPLE`, `SIM_BUY_FEE_PCT`, `SIM_SELL_FEE_PCT` (simulation settings)
 
 ## Commands
 - `/start` - onboarding and status
 - `/status` - monitoring status, last scan, counters, filters
 - `/eligible` - list currently eligible tokens
+- `/stats` - list tokens called in the last 24h
 - `/filters` - current filters
-- `/performance [7d|30d|all] [export]` - performance summary (default all-time), optional CSV export
+- `/performance [7d|30d|all] [export]` - simulation summary (default all-time), optional CSV export
 - `/health` - health summary (admin only)
 - `/pause` - pause monitoring (admin only)
 - `/resume` - resume monitoring (admin only)
 - `/mute <duration>` - mute alerts for a duration like `1h`, `30m` (admin only)
+- `/reset` - reset simulation baseline (admin only)
 - `/help` - quick help
 
 ## Alert format

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import csv
+import heapq
 import io
 import json
 import statistics
@@ -62,12 +63,13 @@ HELP_TEXT = (
     "/status - monitoring status and filters\n"
     "/eligible - list currently eligible tokens\n"
     "/stats - list tokens called in the last 24h\n"
-    "/performance - performance summary (all-time)\n"
+    "/performance - simulation summary (all-time)\n"
     "/filters - current filters\n"
     "/health - health summary (admin only)\n"
     "/pause - pause monitoring (admin only)\n"
     "/resume - resume monitoring (admin only)\n"
     "/mute <duration> - mute alerts, ex: 1h or 30m (admin only)\n"
+    "/reset - reset simulation baseline (admin only)\n"
     "/help - this help"
 )
 
@@ -258,7 +260,7 @@ def _format_price(value: Optional[float]) -> str:
     return f"${value:,.8f}".rstrip("0").rstrip(".")
 
 
-def format_called_stats(rows, tz_name: str, retention_sec: int, limit: int) -> str:
+def format_called_stats(rows, tz_name: str, retention_sec: int, limit: int, config) -> str:
     hours = max(1, int(retention_sec / 3600))
     header = f"<pre>{WELCOME_HEADER}</pre>"
     if not rows:
@@ -270,28 +272,32 @@ def format_called_stats(rows, tz_name: str, retention_sec: int, limit: int) -> s
         name = escape_html(row["last_name"] or "Unknown")
         symbol = escape_html(row["last_symbol"] or "?")
         called_ts = row["eligible_first_at"]
-        found_snapshot = _parse_metrics_snapshot(row["eligible_first_metrics"])
-        current_snapshot = _parse_metrics_snapshot(row["last_seen_metrics"])
-        if not current_snapshot:
-            current_snapshot = found_snapshot
-
-        called_price = row["called_price_usd"]
-        max_price = row["max_price_usd"]
-        roi = None
-        if called_price and max_price and called_price > 0:
-            roi = ((max_price / called_price) - 1.0) * 100.0
-
-        ath_mcap = row["max_market_cap"]
-        if ath_mcap is None:
-            ath_mcap = _to_float(found_snapshot.get("marketCap"))
+        sim = _compute_sim_row(row, config)
+        entry_price = sim["entry_price"]
+        current_price = sim["current_price"]
+        max_multiple = sim["max_multiple"]
+        min_multiple = sim["min_multiple"]
+        recouped = sim["recouped"]
+        recouped_at = sim["recouped_at"]
 
         lines.append(f"{idx}. {name} ({symbol})")
         lines.append(f"CA: <code>{escape_html(token_address)}</code>")
         lines.append(f"Called: {format_ts_bold_if_past(called_ts, tz_name)}")
-        lines.append(f"MCap called: {_format_mcap_from_snapshot(found_snapshot)}")
-        lines.append(f"MCap now: {_format_mcap_from_snapshot(current_snapshot)}")
-        lines.append(f"ATH MCap (since call): {format_usd(ath_mcap)}")
-        lines.append(f"Max ROI (since call): {format_pct(roi)}")
+        lines.append(
+            f"Entry: {_format_price(entry_price)} | Now: {_format_price(current_price)}"
+        )
+        if max_multiple is not None:
+            lines.append(f"Max multiple: {_format_multiple(max_multiple)}")
+        if min_multiple is not None:
+            drawdown_pct = (min_multiple - 1.0) * 100.0
+            lines.append(f"Min multiple: {_format_multiple(min_multiple)} ({format_pct(drawdown_pct)})")
+        if recouped:
+            recoup_line = "Recoup: yes"
+            if recouped_at:
+                recoup_line += f" at {format_ts(recouped_at, tz_name)}"
+            lines.append(recoup_line)
+        else:
+            lines.append("Recoup: no")
         lines.append("")
     return "\n".join(lines).strip()
 
@@ -323,6 +329,7 @@ async def send_called_stats_message(message, ctx: AppContext) -> None:
         ctx.config.display_timezone,
         ctx.config.eligible_retention_sec,
         ctx.config.called_list_limit,
+        ctx.config,
     )
     await message.reply_text(text, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
 
@@ -499,35 +506,90 @@ def _snapshot_price(raw: Optional[str]) -> Optional[float]:
     return _to_float(data.get("priceUsd"))
 
 
-def _simulate_ladder(row) -> Optional[float]:
+def _format_usd2(value: Optional[float]) -> str:
+    if value is None:
+        return "n/a"
+    return f"${value:,.2f}"
+
+
+def _entry_price_from_row(row) -> Optional[float]:
     called_price = row["called_price_usd"]
-    if not called_price or called_price <= 0:
-        return None
-    max_price = row["max_price_usd"]
+    if called_price and called_price > 0:
+        return called_price
+    fallback = _snapshot_price(row["eligible_first_metrics"])
+    if fallback and fallback > 0:
+        return fallback
     last_price = _snapshot_price(row["last_seen_metrics"])
+    return last_price if last_price and last_price > 0 else None
 
-    peak_multiple = None
-    if max_price and max_price > 0:
-        peak_multiple = max_price / called_price
-    last_multiple = None
-    if last_price and last_price > 0:
-        last_multiple = last_price / called_price
-    if peak_multiple is None and last_multiple is None:
+
+def _compute_sim_row(row, config) -> Dict[str, Any]:
+    entry_price = _entry_price_from_row(row)
+    current_price = _snapshot_price(row["last_seen_metrics"])
+    if current_price is None:
+        current_price = entry_price
+    max_price = row["max_price_usd"] or current_price or entry_price
+    min_price = row["min_price_usd"] or current_price or entry_price
+    target_price = entry_price * config.sim_target_multiple if entry_price else None
+    recouped_at = row["recouped_at"]
+    recouped = False
+    if target_price and max_price and max_price >= target_price:
+        recouped = True
+    if recouped_at:
+        recouped = True
+
+    buy_fee = max(0.0, config.sim_buy_fee_pct) / 100.0
+    sell_fee = max(0.0, config.sim_sell_fee_pct) / 100.0
+    position_size = config.sim_position_size
+
+    tokens_bought = None
+    tokens_sold = None
+    moonbag_tokens = None
+    recoup_possible: Optional[bool] = None
+    if entry_price and entry_price > 0:
+        tokens_bought = position_size / (entry_price * (1.0 + buy_fee))
+        if target_price and target_price > 0 and sell_fee < 1.0:
+            tokens_sold = position_size / (target_price * (1.0 - sell_fee))
+            recoup_possible = tokens_bought > tokens_sold
+            if recoup_possible:
+                moonbag_tokens = tokens_bought - tokens_sold
+
+    net_exit = 1.0 - sell_fee
+    if net_exit < 0:
+        net_exit = 0.0
+
+    tokens_remaining = None
+    if tokens_bought is not None:
+        if recouped and recoup_possible and moonbag_tokens is not None:
+            tokens_remaining = moonbag_tokens
+        else:
+            tokens_remaining = tokens_bought
+
+    current_value = None
+    if tokens_remaining is not None and current_price is not None:
+        current_value = tokens_remaining * current_price * net_exit
+
+    def _multiple(price: Optional[float]) -> Optional[float]:
+        if entry_price and price and entry_price > 0:
+            return price / entry_price
         return None
 
-    peak = peak_multiple or last_multiple or 0.0
-    exit_multiple = last_multiple if last_multiple is not None else peak
-
-    proceeds = 0.0
-    remaining = 1.0
-    if peak >= 1.2:
-        proceeds += 0.5 * 1.2
-        remaining -= 0.5
-    if peak >= 2.0:
-        proceeds += 0.25 * 2.0
-        remaining -= 0.25
-    proceeds += remaining * exit_multiple
-    return proceeds - 1.0
+    return {
+        "entry_price": entry_price,
+        "current_price": current_price,
+        "max_price": max_price,
+        "min_price": min_price,
+        "current_multiple": _multiple(current_price),
+        "max_multiple": _multiple(max_price),
+        "min_multiple": _multiple(min_price),
+        "target_price": target_price,
+        "recouped": recouped,
+        "recouped_at": recouped_at,
+        "recoup_possible": recoup_possible,
+        "tokens_bought": tokens_bought,
+        "moonbag_tokens": moonbag_tokens,
+        "current_value": current_value,
+    }
 
 
 def format_performance_summary(
@@ -536,81 +598,168 @@ def format_performance_summary(
     window_label: str,
     total_calls: int,
     limit: int,
+    config,
+    reset_at: int,
 ) -> str:
     header = f"<pre>{WELCOME_HEADER}</pre>"
     shown = len(rows)
     if total_calls == 0:
         return f"{header}\nPerformance ({window_label}): 0\nNo calls yet."
 
+    now = utc_now_ts()
+    rows_sorted = sorted(rows, key=lambda item: item["eligible_first_at"] or 0)
+    effective_reset = reset_at or 0
+
+    cash = config.sim_start_balance
+    position_size = config.sim_position_size
+    recoup_heap: list[int] = []
+    taken_flags: Dict[str, bool] = {}
+    taken_count = 0
+    skipped_count = 0
+    recouped_cash_count = 0
+
+    for row in rows_sorted:
+        first_at = row["eligible_first_at"] or 0
+        if effective_reset and first_at < effective_reset:
+            continue
+        while recoup_heap and recoup_heap[0] <= first_at:
+            heapq.heappop(recoup_heap)
+            cash += position_size
+            recouped_cash_count += 1
+        if cash >= position_size:
+            taken_flags[row["token_address"]] = True
+            cash -= position_size
+            taken_count += 1
+            if row["recouped_at"]:
+                heapq.heappush(recoup_heap, row["recouped_at"])
+        else:
+            taken_flags[row["token_address"]] = False
+            skipped_count += 1
+
+    while recoup_heap and recoup_heap[0] <= now:
+        heapq.heappop(recoup_heap)
+        cash += position_size
+        recouped_cash_count += 1
+
+    open_positions = max(0, taken_count - recouped_cash_count)
+
     tracked = 0
-    hit_2x = 0
-    hit_3x = 0
-    hit_5x = 0
+    recouped = 0
+    recoup_possible_misses = 0
     multiples: list[float] = []
+    min_multiples: list[float] = []
     winners: list[tuple[float, Any]] = []
-    sim_all: list[float] = []
+    moonbag_10x = 0
+    moonbag_100x = 0
+    moonbag_1000x = 0
+    equity = cash
 
     for row in rows:
-        called_price = row["called_price_usd"]
-        max_price = row["max_price_usd"]
-        multiple = None
-        if called_price and max_price and called_price > 0:
+        if effective_reset and (row["eligible_first_at"] or 0) < effective_reset:
+            continue
+        if taken_flags.get(row["token_address"]) is False:
+            continue
+        sim = _compute_sim_row(row, config)
+        entry_price = sim["entry_price"]
+        if entry_price:
             tracked += 1
-            multiple = max_price / called_price
-            multiples.append(multiple)
-            winners.append((multiple, row))
-            if multiple >= 2.0:
-                hit_2x += 1
-            if multiple >= 3.0:
-                hit_3x += 1
-            if multiple >= 5.0:
-                hit_5x += 1
-        sim_value = _simulate_ladder(row)
-        if sim_value is not None:
-            sim_all.append(sim_value)
+        max_multiple = sim["max_multiple"]
+        if max_multiple is not None:
+            multiples.append(max_multiple)
+            winners.append((max_multiple, row))
+        min_multiple = sim["min_multiple"]
+        if min_multiple is not None:
+            min_multiples.append(min_multiple)
+        if sim["recouped"]:
+            recouped += 1
+            if max_multiple is not None:
+                if max_multiple >= 10.0:
+                    moonbag_10x += 1
+                if max_multiple >= 100.0:
+                    moonbag_100x += 1
+                if max_multiple >= 1000.0:
+                    moonbag_1000x += 1
+        else:
+            if sim["recoup_possible"] is False:
+                recoup_possible_misses += 1
 
-    lines = [header, f"Performance ({window_label})", f"Calls: {total_calls}, tracked: {tracked}"]
+        if taken_flags.get(row["token_address"]):
+            current_value = sim["current_value"]
+            if current_value is not None:
+                equity += current_value
+
+    lines = [
+        header,
+        f"Simulation ({window_label})",
+        f"Signals: {total_calls}, tracked: {tracked}",
+        f"Sim start: {_format_usd2(config.sim_start_balance)} | position: {_format_usd2(position_size)}",
+        f"Target: {config.sim_target_multiple:.2f}x | fees: buy {config.sim_buy_fee_pct:.2f}% / sell {config.sim_sell_fee_pct:.2f}%",
+        f"Taken: {taken_count}, skipped: {skipped_count}, open: {open_positions}",
+        f"Recouped: {recouped} ({_format_ratio(recouped / tracked) if tracked else 'n/a'})",
+        f"Cash: {_format_usd2(cash)} | Equity: {_format_usd2(equity)}",
+    ]
+    if effective_reset:
+        lines.append(f"Reset: {format_ts(effective_reset, tz_name)}")
+
     if total_calls > shown:
         lines.append(f"Showing: {shown} most recent (sample)")
     if tracked > 0:
-        lines.extend(
-            [
-                f"Hit 2x: {hit_2x} ({_format_ratio(hit_2x / tracked)})",
-                f"Hit 3x: {hit_3x} ({_format_ratio(hit_3x / tracked)})",
-                f"Hit 5x: {hit_5x} ({_format_ratio(hit_5x / tracked)})",
-            ]
+        median_multiple = statistics.median(multiples) if multiples else None
+        median_min = statistics.median(min_multiples) if min_multiples else None
+        if median_multiple is not None:
+            lines.append(f"Median max multiple: {_format_multiple(median_multiple)}")
+        if median_min is not None:
+            lines.append(f"Median min multiple: {_format_multiple(median_min)}")
+        lines.append(
+            f"Moonbags: 10x {moonbag_10x} | 100x {moonbag_100x} | 1000x {moonbag_1000x}"
         )
-        median_multiple = statistics.median(multiples)
-        lines.append(f"Median max multiple: {_format_multiple(median_multiple)}")
-
+        if recoup_possible_misses:
+            lines.append(f"Target unreachable (fees too high): {recoup_possible_misses}")
         winners.sort(key=lambda item: item[0], reverse=True)
         lines.append(f"Top {min(PERFORMANCE_TOP_N, len(winners))} winners:")
         for idx, (multiple, row) in enumerate(winners[:PERFORMANCE_TOP_N], start=1):
             name = escape_html(row["last_name"] or "Unknown")
             symbol = escape_html(row["last_symbol"] or "?")
-            hit_3x_at = row["hit_3x_at"]
             called_at = row["eligible_first_at"]
-            time_to_3x = "n/a"
-            if hit_3x_at and called_at:
-                time_to_3x = format_duration(hit_3x_at - called_at)
+            recouped_at = row["recouped_at"]
+            time_to_recoup = "n/a"
+            if recouped_at and called_at:
+                time_to_recoup = format_duration(recouped_at - called_at)
             lines.append(
-                f"{idx}. {name} ({symbol}) {multiple:.2f}x | 3x: {time_to_3x}"
+                f"{idx}. {name} ({symbol}) {multiple:.2f}x | recoup: {time_to_recoup}"
             )
+        sample_count = min(10, len(rows))
+        lines.append(f"Recent sample (last {sample_count}):")
+        for idx, row in enumerate(rows[:sample_count], start=1):
+            sim = _compute_sim_row(row, config)
+            name = escape_html(row["last_name"] or "Unknown")
+            symbol = escape_html(row["last_symbol"] or "?")
+            status = "recouped" if sim["recouped"] else "open"
+            taken = taken_flags.get(row["token_address"])
+            if taken is False:
+                status = f"{status} (skipped)"
+            current_multiple = sim["current_multiple"]
+            max_multiple = sim["max_multiple"]
+            min_multiple = sim["min_multiple"]
+            line = f"{idx}. {name} ({symbol}) {status}"
+            details = []
+            if current_multiple is not None:
+                details.append(f"now {_format_multiple(current_multiple)}")
+            if max_multiple is not None:
+                details.append(f"max {_format_multiple(max_multiple)}")
+            if min_multiple is not None:
+                details.append(f"min {_format_multiple(min_multiple)}")
+            if details:
+                line += " | " + " | ".join(details)
+            lines.append(line)
     else:
         lines.append("Tracked: n/a (waiting for price updates)")
-
-    if sim_all:
-        avg_return = statistics.fmean(sim_all) * 100
-        lines.append(
-            "Sim (equal-weight, 50%@1.2x, 25%@2x, 25%@exit): "
-            f"{format_pct(avg_return)} avg over {len(sim_all)} trades"
-        )
 
     lines.append("Note: best-effort based on tracked updates.")
     return "\n".join(lines)
 
 
-def build_performance_csv(rows, tz_name: str) -> bytes:
+def build_performance_csv(rows, tz_name: str, config) -> bytes:
     output = io.StringIO()
     writer = csv.writer(output)
     writer.writerow(
@@ -619,32 +768,39 @@ def build_performance_csv(rows, tz_name: str) -> bytes:
             "name",
             "symbol",
             "called_at",
-            "called_price_usd",
+            "entry_price_usd",
+            "current_price_usd",
             "max_price_usd",
+            "min_price_usd",
+            "current_multiple",
             "max_multiple",
-            "hit_2x_at",
-            "hit_3x_at",
-            "hit_5x_at",
+            "min_multiple",
+            "recouped_at",
         ]
     )
     for row in rows:
-        called_price = row["called_price_usd"]
+        sim = _compute_sim_row(row, config)
+        entry_price = sim["entry_price"]
+        current_price = sim["current_price"]
         max_price = row["max_price_usd"]
-        multiple = None
-        if called_price and max_price and called_price > 0:
-            multiple = max_price / called_price
+        min_price = row["min_price_usd"]
+        current_multiple = sim["current_multiple"]
+        max_multiple = sim["max_multiple"]
+        min_multiple = sim["min_multiple"]
         writer.writerow(
             [
                 row["token_address"],
                 row["last_name"] or "Unknown",
                 row["last_symbol"] or "?",
                 format_ts(row["eligible_first_at"], tz_name),
-                called_price if called_price is not None else "",
+                entry_price if entry_price is not None else "",
+                current_price if current_price is not None else "",
                 max_price if max_price is not None else "",
-                f"{multiple:.2f}" if multiple is not None else "",
-                format_ts(row["hit_2x_at"], tz_name),
-                format_ts(row["hit_3x_at"], tz_name),
-                format_ts(row["hit_5x_at"], tz_name),
+                min_price if min_price is not None else "",
+                f"{current_multiple:.2f}" if current_multiple is not None else "",
+                f"{max_multiple:.2f}" if max_multiple is not None else "",
+                f"{min_multiple:.2f}" if min_multiple is not None else "",
+                format_ts(row["recouped_at"], tz_name),
             ]
         )
     return output.getvalue().encode("utf-8")
@@ -698,6 +854,13 @@ def format_status(
         f"Rates: candidates/min {candidates_per_min:.2f}, pairs_fetched/min {pairs_per_min:.2f}",
         f"API: requests {api_requests}, rate_limited {rate_limited}",
         f"Median alert lag: {format_duration(median_lag_sec)}",
+        (
+            "Sim: start "
+            f"{_format_usd2(ctx.config.sim_start_balance)}, "
+            f"pos {_format_usd2(ctx.config.sim_position_size)}, "
+            f"target {ctx.config.sim_target_multiple:.2f}x, "
+            f"fees {ctx.config.sim_buy_fee_pct:.2f}%/{ctx.config.sim_sell_fee_pct:.2f}%"
+        ),
         "Filters:",
         format_filters(ctx),
     ]
@@ -872,15 +1035,21 @@ async def cmd_performance(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             else:
                 window_label = f"last {format_duration(duration)}"
 
-    total_calls = await ctx.db.count_called_since(min_first_at)
+    reset_at = await ctx.db.get_state_int("sim_reset_at", 0)
+    effective_min = min_first_at
+    if reset_at and (effective_min is None or reset_at > effective_min):
+        effective_min = reset_at
+    total_calls = await ctx.db.count_called_since(effective_min)
     limit = PERFORMANCE_EXPORT_LIMIT if export else PERFORMANCE_SUMMARY_LIMIT
-    rows = await ctx.db.get_called_for_performance(limit, min_first_at)
+    rows = await ctx.db.get_called_for_performance(limit, effective_min)
     text = format_performance_summary(
         rows,
         ctx.config.display_timezone,
         window_label,
         total_calls,
         limit,
+        ctx.config,
+        reset_at,
     )
     await update.effective_message.reply_text(
         text,
@@ -888,7 +1057,7 @@ async def cmd_performance(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         disable_web_page_preview=True,
     )
     if export and rows:
-        csv_bytes = build_performance_csv(rows, ctx.config.display_timezone)
+        csv_bytes = build_performance_csv(rows, ctx.config.display_timezone, ctx.config)
         filename = f"performance_{window_label.replace(' ', '_')}.csv"
         await update.effective_message.reply_document(
             document=InputFile(io.BytesIO(csv_bytes), filename=filename),
@@ -973,6 +1142,21 @@ async def cmd_mute(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+async def cmd_reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    ctx = get_app_ctx(context)
+    if ctx is None:
+        await update.effective_message.reply_text("Bot is starting, try again in a moment.")
+        return
+    if not await is_admin(update, context, ctx):
+        await update.effective_message.reply_text("Admin only.")
+        return
+    reset_at = utc_now_ts()
+    await ctx.db.set_state("sim_reset_at", str(reset_at))
+    await update.effective_message.reply_text(
+        f"Simulation reset at {format_ts(reset_at, ctx.config.display_timezone)}"
+    )
+
+
 async def cmd_setthresholds(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     ctx = get_app_ctx(context)
     if ctx is None:
@@ -1053,6 +1237,7 @@ def register_handlers(application: Application) -> None:
     application.add_handler(CommandHandler("pause", cmd_pause))
     application.add_handler(CommandHandler("resume", cmd_resume))
     application.add_handler(CommandHandler("mute", cmd_mute))
+    application.add_handler(CommandHandler("reset", cmd_reset))
     application.add_handler(CommandHandler("setthresholds", cmd_setthresholds))
 
     application.add_handler(CallbackQueryHandler(on_callback))
