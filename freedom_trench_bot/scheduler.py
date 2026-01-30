@@ -212,6 +212,8 @@ class Scanner:
             "sim_position_size", config.sim_position_size
         )
         sim_cash = await db.get_state_float("sim_cash", sim_start_balance)
+        sim_buy_fee = config.sim_buy_fee_pct / 100.0
+        sim_sell_fee = config.sim_sell_fee_pct / 100.0
 
         fresh_pairs = await self.ctx.discovery.discover_pairs()
         await increment_counter(db, "scans", 1)
@@ -415,6 +417,21 @@ class Scanner:
                 and eligible_first_at >= sim_reset_at
             ):
                 sim_cash += sim_position_size
+            if recouped_at and token_row["moonbag_tokens"] is None:
+                entry_price = called_price_usd or price_usd
+                position_usd = token_row["sim_position_usd"] or sim_position_size
+                if entry_price and entry_price > 0 and sim_sell_fee < 1.0:
+                    tokens_bought = position_usd / (entry_price * (1.0 + sim_buy_fee))
+                    target_price = entry_price * config.sim_target_multiple
+                    tokens_sold = position_usd / (target_price * (1.0 - sim_sell_fee))
+                    if tokens_bought > tokens_sold:
+                        moonbag_tokens = tokens_bought - tokens_sold
+                        await db.update_moonbag_state(
+                            token_address=token_address,
+                            moonbag_tokens=moonbag_tokens,
+                            moonbag_sold_at=None,
+                            moonbag_sold_value=None,
+                        )
 
             await db.update_token_state(
                 token_address=token_address,
@@ -557,6 +574,8 @@ class Scanner:
                 "sim_position_size", self.ctx.config.sim_position_size
             )
             sim_cash = await self.ctx.db.get_state_float("sim_cash", sim_start_balance)
+            sim_buy_fee = self.ctx.config.sim_buy_fee_pct / 100.0
+            sim_sell_fee = self.ctx.config.sim_sell_fee_pct / 100.0
             batch_size = 500
             while True:
                 rows = await self.ctx.db.get_tokens_missing_called_price(batch_size)
@@ -599,6 +618,21 @@ class Scanner:
                         and row["eligible_first_at"] >= sim_reset_at
                     ):
                         sim_cash += sim_position_size
+                    if recouped_at and row["moonbag_tokens"] is None:
+                        entry_price = called_price or last_price
+                        position_usd = row["sim_position_usd"] or sim_position_size
+                        if entry_price and entry_price > 0 and sim_sell_fee < 1.0:
+                            tokens_bought = position_usd / (entry_price * (1.0 + sim_buy_fee))
+                            target_price = entry_price * self.ctx.config.sim_target_multiple
+                            tokens_sold = position_usd / (target_price * (1.0 - sim_sell_fee))
+                            if tokens_bought > tokens_sold:
+                                moonbag_tokens = tokens_bought - tokens_sold
+                                await self.ctx.db.update_moonbag_state(
+                                    token_address=token_address,
+                                    moonbag_tokens=moonbag_tokens,
+                                    moonbag_sold_at=None,
+                                    moonbag_sold_value=None,
+                                )
                     post_alert_price_usd = row["post_alert_price_usd"]
                     post_alert_at = row["post_alert_at"]
                     if (
@@ -663,6 +697,8 @@ class Scanner:
             "sim_position_size", self.ctx.config.sim_position_size
         )
         sim_cash = await self.ctx.db.get_state_float("sim_cash", sim_start_balance)
+        sim_buy_fee = self.ctx.config.sim_buy_fee_pct / 100.0
+        sim_sell_fee = self.ctx.config.sim_sell_fee_pct / 100.0
         rows = await self.ctx.db.get_called_for_refresh(PERFORMANCE_BATCH_SIZE, min_first_at)
         if not rows:
             return
@@ -736,6 +772,21 @@ class Scanner:
                 and row["eligible_first_at"] >= sim_reset_at
             ):
                 sim_cash += sim_position_size
+            if recouped_at and row["moonbag_tokens"] is None:
+                entry_price = called_price_usd or price_usd
+                position_usd = row["sim_position_usd"] or sim_position_size
+                if entry_price and entry_price > 0 and sim_sell_fee < 1.0:
+                    tokens_bought = position_usd / (entry_price * (1.0 + sim_buy_fee))
+                    target_price = entry_price * self.ctx.config.sim_target_multiple
+                    tokens_sold = position_usd / (target_price * (1.0 - sim_sell_fee))
+                    if tokens_bought > tokens_sold:
+                        moonbag_tokens = tokens_bought - tokens_sold
+                        await self.ctx.db.update_moonbag_state(
+                            token_address=token_address,
+                            moonbag_tokens=moonbag_tokens,
+                            moonbag_sold_at=None,
+                            moonbag_sold_value=None,
+                        )
 
             await self.ctx.db.update_performance_snapshot(
                 token_address=token_address,

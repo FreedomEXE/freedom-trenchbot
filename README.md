@@ -72,10 +72,11 @@ Set `DRY_RUN=true` to log would-alert tokens without posting to Telegram.
 ## Commands
 - `/start` - onboarding and status
 - `/status` - monitoring status, last scan, counters, filters
-- `/stats` - list tokens called in the last 24h
+- `/stats` - account summary (since reset)
 - `/filters` - current filters
 - `/performance [7d|30d|all] [export]` - simulation summary (default all-time), optional CSV export
 - `/archive [7d|30d|all]` - archive summary before reset
+- `/moonbag` - list moonbag holdings and sell (admin only)
 - `/health` - health summary (admin only)
 - `/pause` - pause monitoring (admin only)
 - `/resume` - resume monitoring (admin only)

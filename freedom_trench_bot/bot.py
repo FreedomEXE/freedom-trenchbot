@@ -62,9 +62,10 @@ PERFORMANCE_EXPORT_LIMIT = 50000
 HELP_TEXT = (
     "/start - onboarding and status\n"
     "/status - monitoring status and filters\n"
-    "/stats - list tokens called in the last 24h\n"
+    "/stats - account summary (since reset)\n"
     "/performance - simulation summary (since reset by default)\n"
     "/archive - archive summary before reset (all-time)\n"
+    "/moonbag - list moonbag holdings (admin only)\n"
     "/filters - current filters\n"
     "/health - health summary (admin only)\n"
     "/pause - pause monitoring (admin only)\n"
@@ -606,10 +607,19 @@ def _compute_sim_row(row, config) -> Dict[str, Any]:
     if net_exit < 0:
         net_exit = 0.0
 
+    moonbag_tokens = row["moonbag_tokens"]
+    moonbag_sold_at = row["moonbag_sold_at"]
     tokens_remaining = None
     if tokens_bought is not None:
-        if recouped and recoup_possible and moonbag_tokens is not None:
-            tokens_remaining = moonbag_tokens
+        if recouped:
+            if moonbag_sold_at:
+                tokens_remaining = 0.0
+            elif moonbag_tokens is not None:
+                tokens_remaining = moonbag_tokens
+            elif recoup_possible and moonbag_tokens is not None:
+                tokens_remaining = moonbag_tokens
+            else:
+                tokens_remaining = 0.0
         else:
             tokens_remaining = tokens_bought
 
@@ -640,6 +650,7 @@ def _compute_sim_row(row, config) -> Dict[str, Any]:
         "recoup_possible": recoup_possible,
         "tokens_bought": tokens_bought,
         "moonbag_tokens": moonbag_tokens,
+        "moonbag_sold_at": moonbag_sold_at,
         "current_value": current_value,
     }
 
@@ -656,7 +667,7 @@ def format_performance_summary(
     header = f"<pre>{WELCOME_HEADER}</pre>"
     shown = len(rows)
     if total_calls == 0:
-        return f"{header}\nPerformance ({window_label}): 0\nNo calls yet."
+        return f"{header}\nSimulation ({window_label}): 0\nNo calls yet."
 
     now = utc_now_ts()
     rows_sorted = sorted(rows, key=lambda item: item["eligible_first_at"] or 0)
@@ -956,6 +967,40 @@ def format_filters(ctx: AppContext) -> str:
     return "\n".join(lines)
 
 
+def format_account_stats(rows, tz_name: str, sim_settings, reset_at: int, sim_cash: float) -> str:
+    header = f"<pre>{WELCOME_HEADER}</pre>"
+    equity = sim_cash
+    taken = 0
+    recouped = 0
+    for row in rows:
+        if reset_at and (row["eligible_first_at"] or 0) < reset_at:
+            continue
+        if row["sim_taken"] is None or not bool(row["sim_taken"]):
+            continue
+        taken += 1
+        sim = _compute_sim_row(row, sim_settings)
+        if sim["recouped"]:
+            recouped += 1
+        current_value = sim["current_value"]
+        if current_value is not None:
+            equity += current_value
+    roi = None
+    if sim_settings.sim_start_balance:
+        roi = ((equity / sim_settings.sim_start_balance) - 1.0) * 100.0
+    lines = [
+        header,
+        "Account Summary",
+        f"Sim start: {_format_usd2(sim_settings.sim_start_balance)}",
+        f"Cash: {_format_usd2(sim_cash)}",
+        f"Equity: {_format_usd2(equity)}",
+        f"ROI: {format_pct(roi)}",
+        f"Taken: {taken} | Recouped: {recouped}",
+    ]
+    if reset_at:
+        lines.append(f"Reset: {format_ts(reset_at, tz_name)}")
+    return "\n".join(lines)
+
+
 def format_status(
     ctx: AppContext,
     paused: bool,
@@ -1078,9 +1123,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     status_text = "\n".join(status_lines)
 
     if update.effective_message:
-        await update.effective_message.reply_text(
-            sim_text, reply_markup=keyboard
-        )
+        await update.effective_message.reply_text(sim_text, reply_markup=keyboard)
         await update.effective_message.reply_text(
             status_text, reply_markup=build_status_keyboard()
         )
@@ -1167,7 +1210,12 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if ctx is None:
         await update.effective_message.reply_text("Bot is starting, try again in a moment.")
         return
-    await send_called_stats_message(update.effective_message, ctx)
+    reset_at = await ctx.db.get_state_int("sim_reset_at", 0)
+    rows = await ctx.db.get_called_for_performance(PERFORMANCE_EXPORT_LIMIT, reset_at or None)
+    sim_settings = await get_sim_settings(ctx)
+    sim_cash = await ctx.db.get_state_float("sim_cash", sim_settings.sim_start_balance)
+    text = format_account_stats(rows, ctx.config.display_timezone, sim_settings, reset_at, sim_cash)
+    await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML)
 
 
 async def cmd_performance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1283,6 +1331,60 @@ async def cmd_archive(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         text,
         parse_mode=ParseMode.HTML,
         disable_web_page_preview=True,
+    )
+
+
+async def cmd_moonbag(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    ctx = get_app_ctx(context)
+    if ctx is None:
+        await update.effective_message.reply_text("Bot is starting, try again in a moment.")
+        return
+    if not await is_admin(update, context, ctx):
+        await update.effective_message.reply_text("Admin only.")
+        return
+    now = utc_now_ts()
+    reset_at = await ctx.db.get_state_int("sim_reset_at", 0)
+    rows = await ctx.db.get_called_for_performance(PERFORMANCE_EXPORT_LIMIT, reset_at or None)
+    sim_settings = await get_sim_settings(ctx)
+    lines = [f"<pre>{WELCOME_HEADER}</pre>", "Moonbag Holdings"]
+    buttons = []
+    total_value = 0.0
+    any_holdings = False
+    for row in rows:
+        if reset_at and (row["eligible_first_at"] or 0) < reset_at:
+            continue
+        if not row["sim_taken"]:
+            continue
+        sim = _compute_sim_row(row, sim_settings)
+        if not sim["recouped"]:
+            continue
+        if row["moonbag_sold_at"]:
+            continue
+        if not row["moonbag_tokens"]:
+            continue
+        any_holdings = True
+        current_value = sim["current_value"]
+        name = escape_html(row["last_name"] or "Unknown")
+        symbol = escape_html(row["last_symbol"] or "?")
+        lines.append(f"{name} ({symbol})")
+        lines.append(f"CA: <code>{escape_html(row['token_address'])}</code>")
+        if sim["current_multiple"] is not None:
+            lines.append(f"Now: {_format_multiple(sim['current_multiple'])}")
+        if current_value is not None:
+            total_value += current_value
+            lines.append(f"Value: {_format_usd2(current_value)}")
+        lines.append("")
+        buttons.append([InlineKeyboardButton(f"Sell {symbol}", callback_data=f"moonbag:sell:{row['token_address']}")])
+    lines.append(f"Total value: {_format_usd2(total_value)}")
+    if not any_holdings:
+        lines.append("No moonbags yet.")
+    if buttons:
+        buttons.append([InlineKeyboardButton("Sell All", callback_data="moonbag:sell_all")])
+    await update.effective_message.reply_text(
+        "\n".join(lines).strip(),
+        parse_mode=ParseMode.HTML,
+        disable_web_page_preview=True,
+        reply_markup=InlineKeyboardMarkup(buttons) if buttons else None,
     )
 
 
@@ -1459,6 +1561,70 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             )
             return
 
+    if data.startswith("moonbag:"):
+        if not await is_admin(update, context, ctx):
+            await query.answer("Admin only", show_alert=True)
+            return
+        parts = data.split(":")
+        if len(parts) >= 2 and parts[1] == "sell_all":
+            sim_settings = await get_sim_settings(ctx)
+            sim_cash = await ctx.db.get_state_float("sim_cash", sim_settings.sim_start_balance)
+            reset_at = await ctx.db.get_state_int("sim_reset_at", 0)
+            rows = await ctx.db.get_called_for_performance(PERFORMANCE_EXPORT_LIMIT, reset_at or None)
+            sold_total = 0.0
+            for row in rows:
+                if reset_at and (row["eligible_first_at"] or 0) < reset_at:
+                    continue
+                if not row["sim_taken"]:
+                    continue
+                if not row["moonbag_tokens"] or row["moonbag_sold_at"]:
+                    continue
+                sim = _compute_sim_row(row, sim_settings)
+                current_value = sim["current_value"]
+                if current_value is None:
+                    continue
+                sim_cash += current_value
+                sold_total += current_value
+                await ctx.db.update_moonbag_state(
+                    token_address=row["token_address"],
+                    moonbag_tokens=row["moonbag_tokens"],
+                    moonbag_sold_at=utc_now_ts(),
+                    moonbag_sold_value=current_value,
+                )
+            await ctx.db.set_state("sim_cash", str(sim_cash))
+            await query.message.reply_text(
+                f"Sold all moonbags for {_format_usd2(sold_total)}. Cash: {_format_usd2(sim_cash)}"
+            )
+            return
+        if len(parts) >= 3 and parts[1] == "sell":
+            token_address = parts[2]
+            sim_settings = await get_sim_settings(ctx)
+            row = await ctx.db.get_token(token_address)
+            if row is None:
+                await query.message.reply_text("Token not found.")
+                return
+            if not row["moonbag_tokens"] or row["moonbag_sold_at"]:
+                await query.message.reply_text("No moonbag to sell.")
+                return
+            sim = _compute_sim_row(row, sim_settings)
+            current_value = sim["current_value"]
+            if current_value is None:
+                await query.message.reply_text("No price available.")
+                return
+            sim_cash = await ctx.db.get_state_float("sim_cash", sim_settings.sim_start_balance)
+            sim_cash += current_value
+            await ctx.db.set_state("sim_cash", str(sim_cash))
+            await ctx.db.update_moonbag_state(
+                token_address=token_address,
+                moonbag_tokens=row["moonbag_tokens"],
+                moonbag_sold_at=utc_now_ts(),
+                moonbag_sold_value=current_value,
+            )
+            await query.message.reply_text(
+                f"Sold moonbag for {_format_usd2(current_value)}. Cash: {_format_usd2(sim_cash)}"
+            )
+            return
+
     if data == "settings":
         await query.message.reply_text(
             f"<pre>{WELCOME_HEADER}</pre>\n{format_filters(ctx)}",
@@ -1480,6 +1646,7 @@ def register_handlers(application: Application) -> None:
     application.add_handler(CommandHandler("stats", cmd_stats))
     application.add_handler(CommandHandler("performance", cmd_performance))
     application.add_handler(CommandHandler("archive", cmd_archive))
+    application.add_handler(CommandHandler("moonbag", cmd_moonbag))
     application.add_handler(CommandHandler("filters", cmd_filters))
     application.add_handler(CommandHandler("health", cmd_health))
     application.add_handler(CommandHandler("pause", cmd_pause))

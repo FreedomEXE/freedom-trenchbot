@@ -53,6 +53,9 @@ class Database:
                 sim_cash_after REAL,
                 sim_position_usd REAL,
                 sim_ape_pct REAL,
+                moonbag_tokens REAL,
+                moonbag_sold_at INTEGER,
+                moonbag_sold_value REAL,
                 wallet_analysis_at INTEGER,
                 wallet_analysis_json TEXT,
                 wallet_analysis_partial INTEGER,
@@ -93,6 +96,9 @@ class Database:
         await self._ensure_column("tokens", "sim_cash_after", "REAL")
         await self._ensure_column("tokens", "sim_position_usd", "REAL")
         await self._ensure_column("tokens", "sim_ape_pct", "REAL")
+        await self._ensure_column("tokens", "moonbag_tokens", "REAL")
+        await self._ensure_column("tokens", "moonbag_sold_at", "INTEGER")
+        await self._ensure_column("tokens", "moonbag_sold_value", "REAL")
         await self._ensure_column("tokens", "wallet_analysis_at", "INTEGER")
         await self._ensure_column("tokens", "wallet_analysis_json", "TEXT")
         await self._ensure_column("tokens", "wallet_analysis_partial", "INTEGER")
@@ -309,6 +315,26 @@ class Database:
         )
         await self.conn.commit()
 
+    async def update_moonbag_state(
+        self,
+        token_address: str,
+        moonbag_tokens: Optional[float],
+        moonbag_sold_at: Optional[int],
+        moonbag_sold_value: Optional[float],
+    ) -> None:
+        assert self.conn is not None
+        await self.conn.execute(
+            """
+            UPDATE tokens
+            SET moonbag_tokens = ?,
+                moonbag_sold_at = ?,
+                moonbag_sold_value = ?
+            WHERE token_address = ?
+            """,
+            (moonbag_tokens, moonbag_sold_at, moonbag_sold_value, token_address),
+        )
+        await self.conn.commit()
+
     async def update_wallet_analysis(
         self,
         token_address: str,
@@ -358,7 +384,8 @@ class Database:
             SELECT token_address, eligible_first_at, eligible_first_metrics, last_seen_metrics,
                    called_price_usd, max_price_usd, min_price_usd, max_market_cap, recouped_at,
                    post_alert_price_usd, post_alert_at, above_target_started_at,
-                   above_target_last_at, above_target_total_sec, sim_taken
+                   above_target_last_at, above_target_total_sec, sim_taken,
+                   sim_position_usd, moonbag_tokens, moonbag_sold_at
             FROM tokens
             WHERE eligible_first_at IS NOT NULL
               AND called_price_usd IS NULL
@@ -427,7 +454,8 @@ class Database:
                        called_price_usd, max_price_usd, min_price_usd,
                        last_seen_metrics, eligible_first_metrics, recouped_at,
                        post_alert_price_usd, post_alert_at, above_target_total_sec,
-                       sim_taken, sim_cash_before, sim_cash_after, sim_position_usd, sim_ape_pct
+                       sim_taken, sim_cash_before, sim_cash_after, sim_position_usd, sim_ape_pct,
+                       moonbag_tokens, moonbag_sold_at, moonbag_sold_value
                 FROM tokens
                 WHERE eligible_first_at IS NOT NULL
                 ORDER BY eligible_first_at DESC
@@ -442,7 +470,8 @@ class Database:
                        called_price_usd, max_price_usd, min_price_usd,
                        last_seen_metrics, eligible_first_metrics, recouped_at,
                        post_alert_price_usd, post_alert_at, above_target_total_sec,
-                       sim_taken, sim_cash_before, sim_cash_after, sim_position_usd, sim_ape_pct
+                       sim_taken, sim_cash_before, sim_cash_after, sim_position_usd, sim_ape_pct,
+                       moonbag_tokens, moonbag_sold_at, moonbag_sold_value
                 FROM tokens
                 WHERE eligible_first_at IS NOT NULL
                   AND eligible_first_at >= ?
@@ -514,7 +543,8 @@ class Database:
                    called_price_usd, max_price_usd, min_price_usd,
                    last_seen_metrics, eligible_first_metrics, recouped_at,
                    post_alert_price_usd, post_alert_at, above_target_total_sec,
-                   sim_taken, sim_cash_before, sim_cash_after, sim_position_usd, sim_ape_pct
+                   sim_taken, sim_cash_before, sim_cash_after, sim_position_usd, sim_ape_pct,
+                   moonbag_tokens, moonbag_sold_at, moonbag_sold_value
             FROM tokens
             WHERE eligible_first_at IS NOT NULL
               AND eligible_first_at < ?
@@ -536,7 +566,8 @@ class Database:
             SELECT token_address, eligible_first_at, eligible_first_metrics, last_seen_metrics,
                    called_price_usd, max_price_usd, min_price_usd, max_market_cap,
                    recouped_at, post_alert_price_usd, post_alert_at,
-                   above_target_started_at, above_target_last_at, above_target_total_sec, sim_taken
+                   above_target_started_at, above_target_last_at, above_target_total_sec, sim_taken,
+                   sim_position_usd, moonbag_tokens, moonbag_sold_at
             FROM tokens
             WHERE eligible_first_at IS NOT NULL
               AND eligible_first_at >= ?
