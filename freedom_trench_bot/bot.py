@@ -702,6 +702,12 @@ def _entry_price_from_row(row) -> Optional[float]:
 
 
 def _compute_sim_row(row, config) -> Dict[str, Any]:
+    def _row_value(key: str):
+        try:
+            return row[key]
+        except Exception:
+            return None
+
     entry_price = _entry_price_from_row(row)
     current_price = _snapshot_price(row["last_seen_metrics"])
     if current_price is None:
@@ -710,8 +716,8 @@ def _compute_sim_row(row, config) -> Dict[str, Any]:
     min_price = row["min_price_usd"] or current_price or entry_price
     target_price = entry_price * config.sim_target_multiple if entry_price else None
     recouped_at = row["recouped_at"]
-    stoploss_at = row.get("stoploss_at")
-    stoploss_price_usd = row.get("stoploss_price_usd")
+    stoploss_at = _row_value("stoploss_at")
+    stoploss_price_usd = _row_value("stoploss_price_usd")
     recouped = False
     if target_price and max_price and max_price >= target_price:
         recouped = True
