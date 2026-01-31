@@ -1391,20 +1391,22 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if ctx is None:
         await update.effective_message.reply_text("Bot is starting, try again in a moment.")
         return
+    run_start = await ctx.db.get_state_int("sim_run_start_at", 0)
     reset_at = await _get_effective_window_start(ctx)
     rows = await ctx.db.get_called_for_performance(PERFORMANCE_EXPORT_LIMIT, reset_at or None)
     used_reset = bool(reset_at)
-    if reset_at and not rows:
-        total_all = await ctx.db.count_called_since(None)
-        if total_all:
-            rows = await ctx.db.get_called_for_performance(PERFORMANCE_EXPORT_LIMIT, None)
-            used_reset = False
+    if run_start and not rows:
+        text = (
+            f"<pre>{WELCOME_HEADER}</pre>\n"
+            "Account Summary\n"
+            "No calls since run start yet."
+        )
+        await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML)
+        return
     sim_settings = await get_sim_settings(ctx)
     sim_cash = await ctx.db.get_state_float("sim_cash", sim_settings.sim_start_balance)
     effective_reset = reset_at if used_reset else 0
     text = format_account_stats(rows, ctx.config.display_timezone, sim_settings, effective_reset, sim_cash)
-    if reset_at and not used_reset:
-        text += "\nNote: no calls since run start yet; showing all-time."
     await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML)
 
 
@@ -1417,6 +1419,7 @@ async def cmd_performance(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     min_first_at = None
     window_label = "all-time"
     export = False
+    run_start = await ctx.db.get_state_int("sim_run_start_at", 0)
     reset_at = await _get_effective_window_start(ctx)
     if not context.args and reset_at:
         window_label = "since run start"
@@ -1448,13 +1451,18 @@ async def cmd_performance(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         effective_min = reset_at
         used_reset = True
     total_calls = await ctx.db.count_called_since(effective_min)
-    if used_reset and total_calls == 0:
-        total_all = await ctx.db.count_called_since(None)
-        if total_all:
-            effective_min = None
-            window_label = "all-time"
-            total_calls = total_all
-            used_reset = False
+    if run_start and total_calls == 0:
+        text = (
+            f"<pre>{WELCOME_HEADER}</pre>\n"
+            f"Simulation ({window_label})\n"
+            "No calls since run start."
+        )
+        await update.effective_message.reply_text(
+            text,
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True,
+        )
+        return
     limit = PERFORMANCE_EXPORT_LIMIT if export else PERFORMANCE_SUMMARY_LIMIT
     rows = await ctx.db.get_called_for_performance(limit, effective_min)
     sim_settings = await get_sim_settings(ctx)
@@ -1467,8 +1475,6 @@ async def cmd_performance(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         sim_settings,
         reset_at if used_reset else 0,
     )
-    if reset_at and not used_reset:
-        text += "\nNote: no calls since run start yet; showing all-time."
     await update.effective_message.reply_text(
         text,
         parse_mode=ParseMode.HTML,
@@ -1544,14 +1550,18 @@ async def cmd_moonbag(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await update.effective_message.reply_text("Admin only.")
         return
     now = utc_now_ts()
+    run_start = await ctx.db.get_state_int("sim_run_start_at", 0)
     reset_at = await _get_effective_window_start(ctx)
     rows = await ctx.db.get_called_for_performance(PERFORMANCE_EXPORT_LIMIT, reset_at or None)
     used_reset = bool(reset_at)
-    if reset_at and not rows:
-        total_all = await ctx.db.count_called_since(None)
-        if total_all:
-            rows = await ctx.db.get_called_for_performance(PERFORMANCE_EXPORT_LIMIT, None)
-            used_reset = False
+    if run_start and not rows:
+        lines = [f"<pre>{WELCOME_HEADER}</pre>", "Moonbag Holdings", "No calls since run start."]
+        await update.effective_message.reply_text(
+            "\n".join(lines),
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True,
+        )
+        return
     sim_settings = await get_sim_settings(ctx)
     effective_reset = reset_at if used_reset else 0
     lines = [f"<pre>{WELCOME_HEADER}</pre>", "Moonbag Holdings"]
@@ -1586,8 +1596,6 @@ async def cmd_moonbag(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     lines.append(f"Total value: {_format_usd2(total_value)}")
     if not any_holdings:
         lines.append("No moonbags yet.")
-    if reset_at and not used_reset:
-        lines.append("Note: no calls since run start yet; showing all-time.")
     if buttons:
         buttons.append([InlineKeyboardButton("Sell All", callback_data="moonbag:sell_all")])
     await update.effective_message.reply_text(
