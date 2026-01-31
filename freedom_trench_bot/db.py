@@ -345,6 +345,24 @@ class Database:
         )
         await self.conn.commit()
 
+    async def update_stoploss_state(
+        self,
+        token_address: str,
+        stoploss_at: Optional[int],
+        stoploss_price_usd: Optional[float],
+    ) -> None:
+        assert self.conn is not None
+        await self.conn.execute(
+            """
+            UPDATE tokens
+            SET stoploss_at = ?,
+                stoploss_price_usd = ?
+            WHERE token_address = ?
+            """,
+            (stoploss_at, stoploss_price_usd, token_address),
+        )
+        await self.conn.commit()
+
     async def update_wallet_analysis(
         self,
         token_address: str,

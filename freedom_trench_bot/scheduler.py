@@ -12,6 +12,7 @@ from .bot import (
     format_alert_message,
     format_sell_message,
     format_stoploss_message,
+    format_equity_stop_message,
     build_trigger_reason,
 )
 from .filters import evaluate_pair, extract_metrics
@@ -23,6 +24,7 @@ POOL_RETENTION_SEC = 6 * 3600
 PERFORMANCE_LOOKBACK_DAYS = 7
 PERFORMANCE_REFRESH_INTERVAL_SEC = 300
 PERFORMANCE_BATCH_SIZE = 50
+EQUITY_TRAIL_ROW_LIMIT = 50000
 
 
 def _pair_sort_key(pair: Dict[str, Any]) -> float:
@@ -123,6 +125,27 @@ def _snapshot_pair_address(raw: Optional[str]) -> Optional[str]:
     snapshot = _parse_snapshot(raw)
     pair_address = snapshot.get("pairAddress")
     return str(pair_address) if pair_address else None
+
+
+def _entry_price_from_row(row: Dict[str, Any]) -> Optional[float]:
+    called_price = _to_float(row.get("called_price_usd"))
+    if called_price and called_price > 0:
+        return called_price
+    fallback = _snapshot_price(row.get("eligible_first_metrics"))
+    if fallback and fallback > 0:
+        return fallback
+    last_price = _snapshot_price(row.get("last_seen_metrics"))
+    return last_price if last_price and last_price > 0 else None
+
+
+def _current_price_from_row(row: Dict[str, Any]) -> Optional[float]:
+    price = _snapshot_price(row.get("last_seen_metrics"))
+    if price and price > 0:
+        return price
+    post_alert = _to_float(row.get("post_alert_price_usd"))
+    if post_alert and post_alert > 0:
+        return post_alert
+    return _entry_price_from_row(row)
 
 
 def _to_float(value: Any) -> Optional[float]:
@@ -627,7 +650,185 @@ class Scanner:
                     posted_refs=posted_refs,
                     holder_count=holder_count,
                 )
-        await db.set_state("sim_cash", str(sim_cash))
+        sim_cash, equity_stop_triggered = await self._maybe_apply_equity_trail(
+            sim_cash=sim_cash,
+            sim_start_balance=sim_start_balance,
+            sim_position_size=sim_position_size,
+            sim_buy_fee=sim_buy_fee,
+            sim_sell_fee=sim_sell_fee,
+            muted=muted,
+        )
+        if not equity_stop_triggered:
+            await db.set_state("sim_cash", str(sim_cash))
+
+    async def _compute_equity_snapshot(
+        self,
+        sim_cash: float,
+        sim_position_size: float,
+        sim_buy_fee: float,
+        sim_sell_fee: float,
+        sim_reset_at: int,
+    ) -> Tuple[float, List[Dict[str, Any]], List[Dict[str, Any]]]:
+        rows = await self.ctx.db.get_called_for_performance(
+            EQUITY_TRAIL_ROW_LIMIT, sim_reset_at or None
+        )
+        equity = sim_cash
+        open_positions: List[Dict[str, Any]] = []
+        moonbag_sales: List[Dict[str, Any]] = []
+        net_exit = 1.0 - sim_sell_fee
+        if net_exit < 0:
+            net_exit = 0.0
+
+        for row in rows:
+            if sim_reset_at and (row["eligible_first_at"] or 0) < sim_reset_at:
+                continue
+            if not row["sim_taken"]:
+                continue
+            if row["stoploss_at"]:
+                continue
+
+            entry_price = _entry_price_from_row(row)
+            current_price = _current_price_from_row(row)
+            if entry_price is None or entry_price <= 0:
+                continue
+            if current_price is None or current_price <= 0:
+                current_price = entry_price
+
+            position_usd = row["sim_position_usd"] or sim_position_size
+            tokens_bought = position_usd / (entry_price * (1.0 + sim_buy_fee))
+
+            if row["recouped_at"] is None:
+                current_value = tokens_bought * current_price * net_exit
+                equity += current_value
+                open_positions.append(
+                    {
+                        "token_address": row["token_address"],
+                        "current_price": current_price,
+                        "cash_back": current_value,
+                    }
+                )
+                continue
+
+            moonbag_tokens = row["moonbag_tokens"]
+            if moonbag_tokens and not row["moonbag_sold_at"]:
+                current_value = moonbag_tokens * current_price * net_exit
+                equity += current_value
+                moonbag_sales.append(
+                    {
+                        "token_address": row["token_address"],
+                        "current_price": current_price,
+                        "moonbag_tokens": moonbag_tokens,
+                        "value": current_value,
+                    }
+                )
+
+        return equity, open_positions, moonbag_sales
+
+    async def _maybe_apply_equity_trail(
+        self,
+        sim_cash: float,
+        sim_start_balance: float,
+        sim_position_size: float,
+        sim_buy_fee: float,
+        sim_sell_fee: float,
+        muted: bool,
+    ) -> Tuple[float, bool]:
+        config = self.ctx.config
+        if sim_start_balance <= 0:
+            return sim_cash, False
+        if config.sim_equity_trail_multiple <= 0 or config.sim_equity_lock_pct <= 0:
+            return sim_cash, False
+
+        sim_reset_at = await self.ctx.db.get_state_int("sim_reset_at", 0)
+        if sim_reset_at == 0:
+            sim_reset_at = utc_now_ts()
+            await self.ctx.db.set_state("sim_reset_at", str(sim_reset_at))
+
+        equity, open_positions, moonbag_sales = await self._compute_equity_snapshot(
+            sim_cash=sim_cash,
+            sim_position_size=sim_position_size,
+            sim_buy_fee=sim_buy_fee,
+            sim_sell_fee=sim_sell_fee,
+            sim_reset_at=sim_reset_at,
+        )
+
+        sim_equity_peak = await self.ctx.db.get_state_float(
+            "sim_equity_peak", sim_start_balance
+        )
+        if equity > sim_equity_peak:
+            sim_equity_peak = equity
+            await self.ctx.db.set_state("sim_equity_peak", str(sim_equity_peak))
+
+        trail_active = await self.ctx.db.get_state_bool("sim_equity_trail_active", False)
+        activation_level = sim_start_balance * config.sim_equity_trail_multiple
+        if not trail_active and sim_equity_peak >= activation_level:
+            trail_active = True
+            await self.ctx.db.set_state("sim_equity_trail_active", "true")
+
+        if not trail_active:
+            return sim_cash, False
+
+        trail_floor = sim_start_balance + (
+            sim_equity_peak - sim_start_balance
+        ) * config.sim_equity_lock_pct
+        if equity > trail_floor:
+            return sim_cash, False
+
+        now = utc_now_ts()
+        for row in moonbag_sales:
+            await self.ctx.db.update_moonbag_state(
+                token_address=row["token_address"],
+                moonbag_tokens=row["moonbag_tokens"],
+                moonbag_sold_at=now,
+                moonbag_sold_value=row["value"],
+            )
+        for row in open_positions:
+            await self.ctx.db.update_stoploss_state(
+                token_address=row["token_address"],
+                stoploss_at=now,
+                stoploss_price_usd=row["current_price"],
+            )
+
+        new_balance = equity
+        pct = 0.01
+        if sim_start_balance > 0:
+            pct = sim_position_size / sim_start_balance
+        if pct < 0:
+            pct = 0.0
+        new_position_size = new_balance * pct
+        await self.ctx.db.set_state("sim_cash", str(new_balance))
+        await self.ctx.db.set_state("sim_start_balance", str(new_balance))
+        await self.ctx.db.set_state("sim_position_size", str(new_position_size))
+        await self.ctx.db.set_state("sim_reset_at", str(now))
+        await self.ctx.db.set_state("sim_run_start_at", str(now))
+        await self.ctx.db.set_state("sim_equity_peak", str(new_balance))
+        await self.ctx.db.set_state("sim_equity_trail_active", "false")
+
+        if not muted and config.allowed_chat_ids:
+            position_pct = pct * 100.0
+            stop_text = format_equity_stop_message(
+                config.display_timezone,
+                now,
+                sim_equity_peak,
+                trail_floor,
+                new_balance,
+                new_position_size,
+                position_pct,
+            )
+            for chat_id in config.allowed_chat_ids:
+                try:
+                    await self.bot.send_message(
+                        chat_id=chat_id,
+                        text=stop_text,
+                        parse_mode=ParseMode.HTML,
+                        disable_web_page_preview=True,
+                    )
+                except Exception:
+                    self.ctx.logger.exception(
+                        "equity_stop_alert_failed", extra={"chat_id": chat_id}
+                    )
+
+        return new_balance, True
 
     async def backfill_called_prices(self) -> None:
         if self._backfill_lock.locked():

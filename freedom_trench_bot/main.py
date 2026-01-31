@@ -48,6 +48,13 @@ def main() -> None:
         sim_cash = await db.get_state_float("sim_cash", 0.0)
         if sim_cash <= 0:
             await db.set_state("sim_cash", str(config.sim_start_balance))
+            sim_cash = config.sim_start_balance
+        sim_equity_peak = await db.get_state_float("sim_equity_peak", 0.0)
+        if sim_equity_peak <= 0:
+            await db.set_state("sim_equity_peak", str(sim_cash))
+        sim_trail_active = await db.get_state("sim_equity_trail_active")
+        if sim_trail_active is None:
+            await db.set_state("sim_equity_trail_active", "false")
 
         timeout = aiohttp.ClientTimeout(total=config.dex_timeout_sec)
         session = aiohttp.ClientSession(timeout=timeout)

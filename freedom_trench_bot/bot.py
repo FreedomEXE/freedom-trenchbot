@@ -37,6 +37,7 @@ WELCOME_HEADER = "+----------------------------+\n| Freedom Trench Bot         |
 ALERT_HEADER = "+----------------------------+\n| Freedom Trench Bot         |\n| APED 🚀                    |\n+----------------------------+"
 SELL_HEADER = "+----------------------------+\n| Freedom Trench Bot         |\n| SOLD ✅                    |\n+----------------------------+"
 STOPLOSS_HEADER = "+----------------------------+\n| Freedom Trench Bot         |\n| STOP LOSS 🛑               |\n+----------------------------+"
+EQUITY_STOP_HEADER = "+----------------------------+\n| Freedom Trench Bot         |\n| EQUITY STOP 📉             |\n+----------------------------+"
 
 STARTUP_FRAMES = [
     "> initializing...",
@@ -624,6 +625,31 @@ def format_stoploss_message(
     return "\n".join(lines)
 
 
+def format_equity_stop_message(
+    tz_name: str,
+    stopped_at: int,
+    equity_peak: float,
+    trail_floor: float,
+    exit_equity: float,
+    new_position_size: float,
+    position_pct: Optional[float],
+) -> str:
+    header_block = f"<pre>{EQUITY_STOP_HEADER}</pre>"
+    lines = [
+        header_block,
+        "Equity trail stop hit",
+        f"Peak equity: {_format_usd2(equity_peak)}",
+        f"Trail floor: {_format_usd2(trail_floor)}",
+        f"Exit equity: {_format_usd2(exit_equity)}",
+        f"Reset at: {format_ts(stopped_at, tz_name)}",
+    ]
+    position_line = f"New position size: {_format_usd2(new_position_size)}"
+    if position_pct is not None:
+        position_line += f" ({position_pct:.2f}% of balance)"
+    lines.append(position_line)
+    return "\n".join(lines)
+
+
 def format_wallet_analysis_update(
     pair: dict,
     token_address: str,
@@ -1203,12 +1229,30 @@ def format_status(
     median_lag_sec: int,
     sim_cash: float,
     sim_settings,
+    sim_equity_peak: float,
+    sim_equity_trail_active: bool,
 ) -> str:
     now = utc_now_ts()
     mute_active = mute_until and mute_until > now
     mute_line = "Muted: no"
     if mute_active:
         mute_line = f"Muted: yes until {format_ts(mute_until, ctx.config.display_timezone)}"
+
+    trail_line = "Equity trail: inactive"
+    if sim_equity_trail_active:
+        floor = sim_settings.sim_start_balance + (
+            sim_equity_peak - sim_settings.sim_start_balance
+        ) * ctx.config.sim_equity_lock_pct
+        trail_line = (
+            "Equity trail: active "
+            f"(peak {_format_usd2(sim_equity_peak)}, floor {_format_usd2(floor)})"
+        )
+    else:
+        if ctx.config.sim_equity_trail_multiple > 0:
+            trigger = sim_settings.sim_start_balance * ctx.config.sim_equity_trail_multiple
+            trail_line = (
+                f"Equity trail: inactive (activates at {_format_usd2(trigger)})"
+            )
 
     lines = [
         f"Monitoring: {'paused' if paused else 'running'}",
@@ -1231,6 +1275,7 @@ def format_status(
             f"slip {sim_settings.sim_slippage_sample_sec}s"
         ),
         f"Sim cash: {_format_usd2(sim_cash)}",
+        trail_line,
         "Filters:",
         format_filters(ctx),
     ]
@@ -1365,6 +1410,10 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     rate_limited = await ctx.db.get_state_int("metrics_rate_limited_count", 0)
     median_lag_sec = await ctx.db.get_state_int("metrics_alert_lag_median_sec", 0)
     sim_cash = await ctx.db.get_state_float("sim_cash", ctx.config.sim_start_balance)
+    sim_equity_peak = await ctx.db.get_state_float(
+        "sim_equity_peak", ctx.config.sim_start_balance
+    )
+    sim_equity_trail_active = await ctx.db.get_state_bool("sim_equity_trail_active", False)
     sim_settings = await get_sim_settings(ctx)
 
     status = format_status(
@@ -1384,6 +1433,8 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         median_lag_sec,
         sim_cash,
         sim_settings,
+        sim_equity_peak,
+        sim_equity_trail_active,
     )
     lines = [f"<pre>{WELCOME_HEADER}</pre>", status]
     await update.effective_message.reply_text(
@@ -1698,8 +1749,11 @@ async def cmd_reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.effective_message.reply_text("Admin only.")
         return
     reset_at = utc_now_ts()
+    sim_settings = await get_sim_settings(ctx)
     await ctx.db.set_state("sim_reset_at", str(reset_at))
-    await ctx.db.set_state("sim_cash", str(ctx.config.sim_start_balance))
+    await ctx.db.set_state("sim_cash", str(sim_settings.sim_start_balance))
+    await ctx.db.set_state("sim_equity_peak", str(sim_settings.sim_start_balance))
+    await ctx.db.set_state("sim_equity_trail_active", "false")
     await update.effective_message.reply_text(
         f"Simulation reset at {format_ts(reset_at, ctx.config.display_timezone)}"
     )
@@ -1792,6 +1846,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             if parts[1] == "balance":
                 await ctx.db.set_state("sim_start_balance", str(value))
                 await ctx.db.set_state("sim_cash", str(value))
+                await ctx.db.set_state("sim_equity_peak", str(value))
+                await ctx.db.set_state("sim_equity_trail_active", "false")
             else:
                 await ctx.db.set_state("sim_position_size", str(value))
             await query.message.reply_text(
@@ -1803,6 +1859,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             sim_settings = await get_sim_settings(ctx)
             await ctx.db.set_state("sim_reset_at", str(reset_at))
             await ctx.db.set_state("sim_cash", str(sim_settings.sim_start_balance))
+            await ctx.db.set_state("sim_equity_peak", str(sim_settings.sim_start_balance))
+            await ctx.db.set_state("sim_equity_trail_active", "false")
             await query.message.reply_text(
                 f"Simulation started at {format_ts(reset_at, ctx.config.display_timezone)}"
             )

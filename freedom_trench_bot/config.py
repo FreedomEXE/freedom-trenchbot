@@ -53,6 +53,8 @@ class Config:
     sim_position_size: float
     sim_target_multiple: float
     sim_stop_multiple: float
+    sim_equity_trail_multiple: float
+    sim_equity_lock_pct: float
     sim_buy_fee_pct: float
     sim_sell_fee_pct: float
     sim_slippage_sample_sec: int
@@ -126,6 +128,14 @@ def load_config() -> Config:
     sim_position_size = float(os.getenv("SIM_POSITION_SIZE", "1"))
     sim_target_multiple = float(os.getenv("SIM_TARGET_MULTIPLE", "1.3"))
     sim_stop_multiple = float(os.getenv("SIM_STOP_MULTIPLE", "0.5"))
+    sim_equity_trail_multiple = float(os.getenv("SIM_EQUITY_TRAIL_MULTIPLE", "2.0"))
+    sim_equity_lock_pct = float(os.getenv("SIM_EQUITY_LOCK_PCT", "0.5"))
+    if sim_equity_trail_multiple < 0:
+        sim_equity_trail_multiple = 0.0
+    if sim_equity_lock_pct < 0:
+        sim_equity_lock_pct = 0.0
+    if sim_equity_lock_pct > 1:
+        sim_equity_lock_pct = 1.0
     sim_buy_fee_pct = float(os.getenv("SIM_BUY_FEE_PCT", "1.0"))
     sim_sell_fee_pct = float(os.getenv("SIM_SELL_FEE_PCT", "1.0"))
     sim_slippage_sample_sec = int(os.getenv("SIM_SLIPPAGE_SAMPLE_SEC", "30"))
@@ -191,6 +201,8 @@ def load_config() -> Config:
         sim_position_size=sim_position_size,
         sim_target_multiple=sim_target_multiple,
         sim_stop_multiple=sim_stop_multiple,
+        sim_equity_trail_multiple=sim_equity_trail_multiple,
+        sim_equity_lock_pct=sim_equity_lock_pct,
         sim_buy_fee_pct=sim_buy_fee_pct,
         sim_sell_fee_pct=sim_sell_fee_pct,
         sim_slippage_sample_sec=sim_slippage_sample_sec,
