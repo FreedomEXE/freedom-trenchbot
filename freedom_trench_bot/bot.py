@@ -34,6 +34,7 @@ from .utils import (
 WELCOME_HEADER = "+----------------------------+\n| Freedom Trench Bot         |\n| Solana Alerts              |\n+----------------------------+"
 ALERT_HEADER = "+----------------------------+\n| Freedom Trench Bot         |\n| APED 🚀                    |\n+----------------------------+"
 SELL_HEADER = "+----------------------------+\n| Freedom Trench Bot         |\n| SOLD ✅                    |\n+----------------------------+"
+STOPLOSS_HEADER = "+----------------------------+\n| Freedom Trench Bot         |\n| STOP LOSS 🛑               |\n+----------------------------+"
 
 STARTUP_FRAMES = [
     "> initializing...",
@@ -125,6 +126,7 @@ async def get_sim_settings(ctx: AppContext):
             "sim_position_size", ctx.config.sim_position_size
         ),
         sim_target_multiple=ctx.config.sim_target_multiple,
+        sim_stop_multiple=ctx.config.sim_stop_multiple,
         sim_buy_fee_pct=ctx.config.sim_buy_fee_pct,
         sim_sell_fee_pct=ctx.config.sim_sell_fee_pct,
         sim_slippage_sample_sec=ctx.config.sim_slippage_sample_sec,
@@ -291,6 +293,10 @@ def format_called_stats(rows, tz_name: str, retention_sec: int, limit: int, sim_
             lines.append(recoup_line)
         else:
             lines.append("Recoup: no")
+        if sim.get("stoploss_at"):
+            lines.append(f"Stop loss: yes at {format_ts(sim['stoploss_at'], tz_name)}")
+        else:
+            lines.append("Stop loss: no")
         if slippage_pct is not None:
             lines.append(f"Slippage (post-alert): {format_pct(slippage_pct)}")
         if above_target_total_sec:
@@ -536,6 +542,52 @@ def format_sell_message(
     return "\n".join(lines)
 
 
+def format_stoploss_message(
+    pair: dict,
+    token_address: str,
+    metrics: FilterMetrics,
+    sold_price: Optional[float],
+    tz_name: str,
+    sold_at: int,
+    cash_balance: Optional[float],
+) -> str:
+    base = pair.get("baseToken") or {}
+    quote = pair.get("quoteToken") or {}
+    token_address_lc = token_address.lower()
+    token_obj = base
+    if isinstance(base, dict) and base.get("address") and base["address"].lower() == token_address_lc:
+        token_obj = base
+    elif (
+        isinstance(quote, dict)
+        and quote.get("address")
+        and quote["address"].lower() == token_address_lc
+    ):
+        token_obj = quote
+    name = escape_html(token_obj.get("name") or "Unknown")
+    symbol = escape_html(token_obj.get("symbol") or "?")
+    mcap_suffix = ""
+    if metrics.market_cap_label != "Market Cap":
+        mcap_suffix = f" ({escape_html(metrics.market_cap_label)})"
+
+    header_block = f"<pre>{STOPLOSS_HEADER}</pre>"
+    ca_block = f"<pre>{escape_html(token_address)}</pre>"
+
+    lines = [
+        header_block,
+        "Sold at stop loss (-50%)",
+        f"Token: {name} ({symbol})",
+        "Chain: Solana",
+        "CA:",
+        ca_block,
+        f"Sold price: {_format_price(sold_price)}",
+        f"MCap (sold): {format_usd(metrics.market_cap_value)}{mcap_suffix}",
+        f"Sold at: {format_ts(sold_at, tz_name)}",
+    ]
+    if cash_balance is not None:
+        lines.append(f"Account balance (cash): {_format_usd2(cash_balance)}")
+    return "\n".join(lines)
+
+
 def format_wallet_analysis_update(
     pair: dict,
     token_address: str,
@@ -622,11 +674,15 @@ def _compute_sim_row(row, config) -> Dict[str, Any]:
     min_price = row["min_price_usd"] or current_price or entry_price
     target_price = entry_price * config.sim_target_multiple if entry_price else None
     recouped_at = row["recouped_at"]
+    stoploss_at = row.get("stoploss_at")
+    stoploss_price_usd = row.get("stoploss_price_usd")
     recouped = False
     if target_price and max_price and max_price >= target_price:
         recouped = True
     if recouped_at:
         recouped = True
+    if stoploss_at:
+        recouped = False
     post_alert_price = row["post_alert_price_usd"]
     post_alert_at = row["post_alert_at"]
     slippage_pct = None
@@ -658,7 +714,9 @@ def _compute_sim_row(row, config) -> Dict[str, Any]:
     moonbag_sold_at = row["moonbag_sold_at"]
     tokens_remaining = None
     if tokens_bought is not None:
-        if recouped:
+        if stoploss_at:
+            tokens_remaining = 0.0
+        elif recouped:
             if moonbag_sold_at:
                 tokens_remaining = 0.0
             elif moonbag_tokens is not None:
@@ -690,6 +748,8 @@ def _compute_sim_row(row, config) -> Dict[str, Any]:
         "target_price": target_price,
         "recouped": recouped,
         "recouped_at": recouped_at,
+        "stoploss_at": stoploss_at,
+        "stoploss_price_usd": stoploss_price_usd,
         "post_alert_price": post_alert_price,
         "post_alert_at": post_alert_at,
         "slippage_pct": slippage_pct,
@@ -722,7 +782,7 @@ def format_performance_summary(
 
     cash = sim_settings.sim_start_balance
     position_size = sim_settings.sim_position_size
-    recoup_heap: list[int] = []
+    cash_events: list[tuple[int, float]] = []
     taken_flags: Dict[str, bool] = {}
     taken_count = 0
     skipped_count = 0
@@ -732,9 +792,9 @@ def format_performance_summary(
         first_at = row["eligible_first_at"] or 0
         if effective_reset and first_at < effective_reset:
             continue
-        while recoup_heap and recoup_heap[0] <= first_at:
-            heapq.heappop(recoup_heap)
-            cash += position_size
+        while cash_events and cash_events[0][0] <= first_at:
+            _, amount = heapq.heappop(cash_events)
+            cash += amount
             recouped_cash_count += 1
         sim_taken_value = row["sim_taken"]
         if sim_taken_value is not None:
@@ -744,7 +804,18 @@ def format_performance_summary(
                 cash -= position_size
                 taken_count += 1
                 if row["recouped_at"]:
-                    heapq.heappush(recoup_heap, row["recouped_at"])
+                    heapq.heappush(cash_events, (row["recouped_at"], position_size))
+                elif row.get("stoploss_at"):
+                    entry_price = _entry_price_from_row(row)
+                    stop_price = row.get("stoploss_price_usd")
+                    if entry_price and stop_price:
+                        buy_fee = max(0.0, sim_settings.sim_buy_fee_pct) / 100.0
+                        sell_fee = max(0.0, sim_settings.sim_sell_fee_pct) / 100.0
+                        net_exit = (1.0 - sell_fee) / (1.0 + buy_fee)
+                        if net_exit < 0:
+                            net_exit = 0.0
+                        cash_back = position_size * (stop_price / entry_price) * net_exit
+                        heapq.heappush(cash_events, (row["stoploss_at"], cash_back))
             else:
                 skipped_count += 1
         else:
@@ -753,20 +824,32 @@ def format_performance_summary(
                 cash -= position_size
                 taken_count += 1
                 if row["recouped_at"]:
-                    heapq.heappush(recoup_heap, row["recouped_at"])
+                    heapq.heappush(cash_events, (row["recouped_at"], position_size))
+                elif row.get("stoploss_at"):
+                    entry_price = _entry_price_from_row(row)
+                    stop_price = row.get("stoploss_price_usd")
+                    if entry_price and stop_price:
+                        buy_fee = max(0.0, sim_settings.sim_buy_fee_pct) / 100.0
+                        sell_fee = max(0.0, sim_settings.sim_sell_fee_pct) / 100.0
+                        net_exit = (1.0 - sell_fee) / (1.0 + buy_fee)
+                        if net_exit < 0:
+                            net_exit = 0.0
+                        cash_back = position_size * (stop_price / entry_price) * net_exit
+                        heapq.heappush(cash_events, (row["stoploss_at"], cash_back))
             else:
                 taken_flags[row["token_address"]] = False
                 skipped_count += 1
 
-    while recoup_heap and recoup_heap[0] <= now:
-        heapq.heappop(recoup_heap)
-        cash += position_size
+    while cash_events and cash_events[0][0] <= now:
+        _, amount = heapq.heappop(cash_events)
+        cash += amount
         recouped_cash_count += 1
 
     open_positions = max(0, taken_count - recouped_cash_count)
 
     tracked = 0
     recouped = 0
+    stopped = 0
     recoup_possible_misses = 0
     multiples: list[float] = []
     min_multiples: list[float] = []
@@ -795,7 +878,9 @@ def format_performance_summary(
         min_multiple = sim["min_multiple"]
         if min_multiple is not None:
             min_multiples.append(min_multiple)
-        if sim["recouped"]:
+        if sim["stoploss_at"]:
+            stopped += 1
+        elif sim["recouped"]:
             recouped += 1
             if row["eligible_first_at"] and row["recouped_at"]:
                 recoup_times.append(row["recouped_at"] - row["eligible_first_at"])
@@ -807,7 +892,7 @@ def format_performance_summary(
                 if max_multiple >= 1000.0:
                     moonbag_1000x += 1
         else:
-            if sim["recoup_possible"] is False:
+            if not sim["stoploss_at"] and sim["recoup_possible"] is False:
                 recoup_possible_misses += 1
         if sim["above_target_total_sec"]:
             above_target_times.append(int(sim["above_target_total_sec"]))
@@ -828,6 +913,7 @@ def format_performance_summary(
         f"Slippage sample: {sim_settings.sim_slippage_sample_sec}s post-alert",
         f"Taken: {taken_count}, skipped: {skipped_count}, open: {open_positions}",
         f"Recouped: {recouped} ({_format_ratio(recouped / tracked) if tracked else 'n/a'})",
+        f"Stopped: {stopped} ({_format_ratio(stopped / tracked) if tracked else 'n/a'})",
         f"Cash: {_format_usd2(cash)} | Equity: {_format_usd2(equity)}",
     ]
     if effective_reset:
@@ -875,7 +961,10 @@ def format_performance_summary(
             sim = _compute_sim_row(row, sim_settings)
             name = escape_html(row["last_name"] or "Unknown")
             symbol = escape_html(row["last_symbol"] or "?")
-            status = "recouped" if sim["recouped"] else "open"
+            if sim["stoploss_at"]:
+                status = "stopped"
+            else:
+                status = "recouped" if sim["recouped"] else "open"
             taken = taken_flags.get(row["token_address"])
             if taken is False:
                 status = f"{status} (skipped)"
@@ -959,6 +1048,8 @@ def build_performance_csv(rows, tz_name: str, sim_settings) -> bytes:
             "max_multiple",
             "min_multiple",
             "recouped_at",
+            "stoploss_at",
+            "stoploss_price_usd",
             "post_alert_price_usd",
             "post_alert_at",
             "slippage_pct",
@@ -990,6 +1081,8 @@ def build_performance_csv(rows, tz_name: str, sim_settings) -> bytes:
                 f"{max_multiple:.2f}" if max_multiple is not None else "",
                 f"{min_multiple:.2f}" if min_multiple is not None else "",
                 format_ts(row["recouped_at"], tz_name),
+                format_ts(row.get("stoploss_at"), tz_name),
+                row.get("stoploss_price_usd") if row.get("stoploss_price_usd") is not None else "",
                 row["post_alert_price_usd"] if row["post_alert_price_usd"] is not None else "",
                 format_ts(row["post_alert_at"], tz_name),
                 f"{slippage_pct:.2f}" if slippage_pct is not None else "",
@@ -1019,6 +1112,7 @@ def format_account_stats(rows, tz_name: str, sim_settings, reset_at: int, sim_ca
     equity = sim_cash
     taken = 0
     recouped = 0
+    stopped = 0
     for row in rows:
         if reset_at and (row["eligible_first_at"] or 0) < reset_at:
             continue
@@ -1026,7 +1120,9 @@ def format_account_stats(rows, tz_name: str, sim_settings, reset_at: int, sim_ca
             continue
         taken += 1
         sim = _compute_sim_row(row, sim_settings)
-        if sim["recouped"]:
+        if sim["stoploss_at"]:
+            stopped += 1
+        elif sim["recouped"]:
             recouped += 1
         current_value = sim["current_value"]
         if current_value is not None:
@@ -1041,7 +1137,7 @@ def format_account_stats(rows, tz_name: str, sim_settings, reset_at: int, sim_ca
         f"Cash: {_format_usd2(sim_cash)}",
         f"Equity: {_format_usd2(equity)}",
         f"ROI: {format_pct(roi)}",
-        f"Taken: {taken} | Recouped: {recouped}",
+        f"Taken: {taken} | Recouped: {recouped} | Stopped: {stopped}",
     ]
     if reset_at:
         lines.append(f"Reset: {format_ts(reset_at, tz_name)}")
@@ -1088,6 +1184,7 @@ def format_status(
             f"{_format_usd2(sim_settings.sim_start_balance)}, "
             f"pos {_format_usd2(sim_settings.sim_position_size)}, "
             f"target {sim_settings.sim_target_multiple:.2f}x, "
+            f"stop {sim_settings.sim_stop_multiple:.2f}x, "
             f"fees {sim_settings.sim_buy_fee_pct:.2f}%/{sim_settings.sim_sell_fee_pct:.2f}%, "
             f"slip {sim_settings.sim_slippage_sample_sec}s"
         ),
@@ -1156,6 +1253,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"• Balance: {_format_usd2(sim_settings.sim_start_balance)}\n"
         f"• Position: {_format_usd2(sim_settings.sim_position_size)}\n"
         f"• Target: {sim_settings.sim_target_multiple:.2f}x\n"
+        f"• Stop: {sim_settings.sim_stop_multiple:.2f}x\n"
         f"• Fees: {sim_settings.sim_buy_fee_pct:.2f}% / {sim_settings.sim_sell_fee_pct:.2f}%\n"
         f"• Cash now: {_format_usd2(sim_cash)}"
     )

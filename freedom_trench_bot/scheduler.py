@@ -7,7 +7,13 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from telegram.constants import ParseMode
 
-from .bot import build_alert_keyboard, format_alert_message, format_sell_message, build_trigger_reason
+from .bot import (
+    build_alert_keyboard,
+    format_alert_message,
+    format_sell_message,
+    format_stoploss_message,
+    build_trigger_reason,
+)
 from .filters import evaluate_pair, extract_metrics
 from .metrics import add_lag_sample, increment_counter, increment_daily_counter, update_rate_counter
 from .types import AppContext, PairCandidate
@@ -375,9 +381,26 @@ class Scanner:
                 last_ineligible_at = now
 
             recouped_at = token_row["recouped_at"]
+            stoploss_at = token_row["stoploss_at"]
+            stoploss_price_usd = token_row["stoploss_price_usd"]
             recouped_just_now = False
+            stoploss_just_now = False
             if (
-                recouped_at is None
+                stoploss_at is None
+                and recouped_at is None
+                and token_row["sim_taken"]
+                and called_price_usd
+                and price_usd
+                and called_price_usd > 0
+            ):
+                stop_price = called_price_usd * config.sim_stop_multiple
+                if price_usd <= stop_price:
+                    stoploss_at = now
+                    stoploss_price_usd = price_usd
+                    stoploss_just_now = True
+            if (
+                stoploss_at is None
+                and recouped_at is None
                 and called_price_usd
                 and price_usd
                 and called_price_usd > 0
@@ -419,7 +442,22 @@ class Scanner:
                 and eligible_first_at >= sim_reset_at
             ):
                 sim_cash += sim_position_size
-            if recouped_at and token_row["moonbag_tokens"] is None:
+            if (
+                stoploss_at is not None
+                and token_row["stoploss_at"] is None
+                and token_row["sim_taken"]
+                and eligible_first_at
+                and eligible_first_at >= sim_reset_at
+            ):
+                entry_price = called_price_usd or price_usd
+                position_usd = token_row["sim_position_usd"] or sim_position_size
+                if entry_price and entry_price > 0 and stoploss_price_usd:
+                    net_exit = (1.0 - sim_sell_fee) / (1.0 + sim_buy_fee)
+                    if net_exit < 0:
+                        net_exit = 0.0
+                    cash_back = position_usd * (stoploss_price_usd / entry_price) * net_exit
+                    sim_cash += cash_back
+            if recouped_at and stoploss_at is None and token_row["moonbag_tokens"] is None:
                 entry_price = called_price_usd or price_usd
                 position_usd = token_row["sim_position_usd"] or sim_position_size
                 if entry_price and entry_price > 0 and sim_sell_fee < 1.0:
@@ -451,6 +489,8 @@ class Scanner:
                 min_price_usd=min_price_usd,
                 max_market_cap=max_market_cap,
                 recouped_at=recouped_at,
+                stoploss_at=stoploss_at,
+                stoploss_price_usd=stoploss_price_usd,
                 post_alert_price_usd=post_alert_price_usd,
                 post_alert_at=post_alert_at,
                 above_target_started_at=above_target_started_at,
@@ -494,6 +534,21 @@ class Scanner:
                         print(sell_text)
                     else:
                         await self._post_alert(sell_text, primary_candidate.pair, token_address)
+            if stoploss_just_now and token_row["sim_taken"]:
+                if not muted and config.allowed_chat_ids:
+                    stop_text = format_stoploss_message(
+                        primary_candidate.pair,
+                        token_address,
+                        primary_result.metrics,
+                        stoploss_price_usd,
+                        config.display_timezone,
+                        stoploss_at,
+                        sim_cash,
+                    )
+                    if config.dry_run:
+                        print(stop_text)
+                    else:
+                        await self._post_alert(stop_text, primary_candidate.pair, token_address)
 
             already_alerted = token_row["last_alerted_at"]
             if already_alerted:
@@ -619,8 +674,11 @@ class Scanner:
                     if max_market_cap is None:
                         max_market_cap = snapshot_mcap
                     recouped_at = row["recouped_at"]
+                    stoploss_at = row["stoploss_at"]
+                    stoploss_price_usd = row["stoploss_price_usd"]
                     if (
                         recouped_at is None
+                        and stoploss_at is None
                         and called_price
                         and last_price
                         and called_price > 0
@@ -629,6 +687,18 @@ class Scanner:
                         if last_price >= target_price:
                             recouped_at = utc_now_ts()
                     if (
+                        stoploss_at is None
+                        and recouped_at is None
+                        and row["sim_taken"]
+                        and called_price
+                        and last_price
+                        and called_price > 0
+                    ):
+                        stop_price = called_price * self.ctx.config.sim_stop_multiple
+                        if last_price <= stop_price:
+                            stoploss_at = utc_now_ts()
+                            stoploss_price_usd = last_price
+                    if (
                         recouped_at is not None
                         and row["recouped_at"] is None
                         and row["sim_taken"]
@@ -636,7 +706,22 @@ class Scanner:
                         and row["eligible_first_at"] >= sim_reset_at
                     ):
                         sim_cash += sim_position_size
-                    if recouped_at and row["moonbag_tokens"] is None:
+                    if (
+                        stoploss_at is not None
+                        and row["stoploss_at"] is None
+                        and row["sim_taken"]
+                        and row["eligible_first_at"]
+                        and row["eligible_first_at"] >= sim_reset_at
+                    ):
+                        entry_price = called_price or last_price
+                        position_usd = row["sim_position_usd"] or sim_position_size
+                        if entry_price and entry_price > 0 and stoploss_price_usd:
+                            net_exit = (1.0 - sim_sell_fee) / (1.0 + sim_buy_fee)
+                            if net_exit < 0:
+                                net_exit = 0.0
+                            cash_back = position_usd * (stoploss_price_usd / entry_price) * net_exit
+                            sim_cash += cash_back
+                    if recouped_at and stoploss_at is None and row["moonbag_tokens"] is None:
                         entry_price = called_price or last_price
                         position_usd = row["sim_position_usd"] or sim_position_size
                         if entry_price and entry_price > 0 and sim_sell_fee < 1.0:
@@ -686,6 +771,8 @@ class Scanner:
                         min_price_usd=min_price,
                         max_market_cap=max_market_cap,
                         recouped_at=recouped_at,
+                        stoploss_at=stoploss_at,
+                        stoploss_price_usd=stoploss_price_usd,
                         post_alert_price_usd=post_alert_price_usd,
                         post_alert_at=post_alert_at,
                         above_target_started_at=above_target_started_at,
@@ -747,8 +834,23 @@ class Scanner:
                 if max_market_cap is None or metrics.market_cap_value > max_market_cap:
                     max_market_cap = metrics.market_cap_value
             recouped_at = row["recouped_at"]
+            stoploss_at = row["stoploss_at"]
+            stoploss_price_usd = row["stoploss_price_usd"]
             if (
-                recouped_at is None
+                stoploss_at is None
+                and recouped_at is None
+                and row["sim_taken"]
+                and called_price_usd
+                and price_usd
+                and called_price_usd > 0
+            ):
+                stop_price = called_price_usd * self.ctx.config.sim_stop_multiple
+                if price_usd <= stop_price:
+                    stoploss_at = now
+                    stoploss_price_usd = price_usd
+            if (
+                stoploss_at is None
+                and recouped_at is None
                 and called_price_usd
                 and price_usd
                 and called_price_usd > 0
@@ -790,7 +892,22 @@ class Scanner:
                 and row["eligible_first_at"] >= sim_reset_at
             ):
                 sim_cash += sim_position_size
-            if recouped_at and row["moonbag_tokens"] is None:
+            if (
+                stoploss_at is not None
+                and row["stoploss_at"] is None
+                and row["sim_taken"]
+                and row["eligible_first_at"]
+                and row["eligible_first_at"] >= sim_reset_at
+            ):
+                entry_price = called_price_usd or price_usd
+                position_usd = row["sim_position_usd"] or sim_position_size
+                if entry_price and entry_price > 0 and stoploss_price_usd:
+                    net_exit = (1.0 - sim_sell_fee) / (1.0 + sim_buy_fee)
+                    if net_exit < 0:
+                        net_exit = 0.0
+                    cash_back = position_usd * (stoploss_price_usd / entry_price) * net_exit
+                    sim_cash += cash_back
+            if recouped_at and stoploss_at is None and row["moonbag_tokens"] is None:
                 entry_price = called_price_usd or price_usd
                 position_usd = row["sim_position_usd"] or sim_position_size
                 if entry_price and entry_price > 0 and sim_sell_fee < 1.0:
@@ -814,6 +931,8 @@ class Scanner:
                 min_price_usd=min_price_usd,
                 max_market_cap=max_market_cap,
                 recouped_at=recouped_at,
+                stoploss_at=stoploss_at,
+                stoploss_price_usd=stoploss_price_usd,
                 post_alert_price_usd=post_alert_price_usd,
                 post_alert_at=post_alert_at,
                 above_target_started_at=above_target_started_at,
@@ -936,6 +1055,8 @@ class Scanner:
                 min_price_usd=token_row["min_price_usd"],
                 max_market_cap=token_row["max_market_cap"],
                 recouped_at=token_row["recouped_at"],
+                stoploss_at=token_row["stoploss_at"],
+                stoploss_price_usd=token_row["stoploss_price_usd"],
                 post_alert_price_usd=token_row["post_alert_price_usd"],
                 post_alert_at=token_row["post_alert_at"],
                 above_target_started_at=token_row["above_target_started_at"],

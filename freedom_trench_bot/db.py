@@ -66,7 +66,9 @@ class Database:
                 hit_2x_at INTEGER,
                 hit_3x_at INTEGER,
                 hit_5x_at INTEGER,
-                recouped_at INTEGER
+                recouped_at INTEGER,
+                stoploss_at INTEGER,
+                stoploss_price_usd REAL
             )
             """
         )
@@ -110,6 +112,8 @@ class Database:
         await self._ensure_column("tokens", "hit_3x_at", "INTEGER")
         await self._ensure_column("tokens", "hit_5x_at", "INTEGER")
         await self._ensure_column("tokens", "recouped_at", "INTEGER")
+        await self._ensure_column("tokens", "stoploss_at", "INTEGER")
+        await self._ensure_column("tokens", "stoploss_price_usd", "REAL")
         await self._migrate_token_timestamps()
         await self.conn.execute(
             """
@@ -228,6 +232,8 @@ class Database:
         min_price_usd: Optional[float],
         max_market_cap: Optional[float],
         recouped_at: Optional[int],
+        stoploss_at: Optional[int],
+        stoploss_price_usd: Optional[float],
         post_alert_price_usd: Optional[float],
         post_alert_at: Optional[int],
         above_target_started_at: Optional[int],
@@ -252,6 +258,8 @@ class Database:
                 min_price_usd = ?,
                 max_market_cap = ?,
                 recouped_at = ?,
+                stoploss_at = ?,
+                stoploss_price_usd = ?,
                 post_alert_price_usd = ?,
                 post_alert_at = ?,
                 above_target_started_at = ?,
@@ -274,6 +282,8 @@ class Database:
                 min_price_usd,
                 max_market_cap,
                 recouped_at,
+                stoploss_at,
+                stoploss_price_usd,
                 post_alert_price_usd,
                 post_alert_at,
                 above_target_started_at,
@@ -383,6 +393,7 @@ class Database:
             """
             SELECT token_address, eligible_first_at, eligible_first_metrics, last_seen_metrics,
                    called_price_usd, max_price_usd, min_price_usd, max_market_cap, recouped_at,
+                   stoploss_at, stoploss_price_usd,
                    post_alert_price_usd, post_alert_at, above_target_started_at,
                    above_target_last_at, above_target_total_sec, sim_taken,
                    sim_position_usd, moonbag_tokens, moonbag_sold_at
@@ -405,6 +416,8 @@ class Database:
         min_price_usd: Optional[float],
         max_market_cap: Optional[float],
         recouped_at: Optional[int],
+        stoploss_at: Optional[int],
+        stoploss_price_usd: Optional[float],
         post_alert_price_usd: Optional[float],
         post_alert_at: Optional[int],
         above_target_started_at: Optional[int],
@@ -420,6 +433,8 @@ class Database:
                 min_price_usd = ?,
                 max_market_cap = ?,
                 recouped_at = ?,
+                stoploss_at = ?,
+                stoploss_price_usd = ?,
                 post_alert_price_usd = ?,
                 post_alert_at = ?,
                 above_target_started_at = ?,
@@ -433,6 +448,8 @@ class Database:
                 min_price_usd,
                 max_market_cap,
                 recouped_at,
+                stoploss_at,
+                stoploss_price_usd,
                 post_alert_price_usd,
                 post_alert_at,
                 above_target_started_at,
@@ -453,6 +470,7 @@ class Database:
                 SELECT token_address, eligible_first_at, last_name, last_symbol,
                        called_price_usd, max_price_usd, min_price_usd,
                        last_seen_metrics, eligible_first_metrics, recouped_at,
+                       stoploss_at, stoploss_price_usd,
                        post_alert_price_usd, post_alert_at, above_target_total_sec,
                        sim_taken, sim_cash_before, sim_cash_after, sim_position_usd, sim_ape_pct,
                        moonbag_tokens, moonbag_sold_at, moonbag_sold_value
@@ -469,6 +487,7 @@ class Database:
                 SELECT token_address, eligible_first_at, last_name, last_symbol,
                        called_price_usd, max_price_usd, min_price_usd,
                        last_seen_metrics, eligible_first_metrics, recouped_at,
+                       stoploss_at, stoploss_price_usd,
                        post_alert_price_usd, post_alert_at, above_target_total_sec,
                        sim_taken, sim_cash_before, sim_cash_after, sim_position_usd, sim_ape_pct,
                        moonbag_tokens, moonbag_sold_at, moonbag_sold_value
@@ -542,6 +561,7 @@ class Database:
             SELECT token_address, eligible_first_at, last_name, last_symbol,
                    called_price_usd, max_price_usd, min_price_usd,
                    last_seen_metrics, eligible_first_metrics, recouped_at,
+                   stoploss_at, stoploss_price_usd,
                    post_alert_price_usd, post_alert_at, above_target_total_sec,
                    sim_taken, sim_cash_before, sim_cash_after, sim_position_usd, sim_ape_pct,
                    moonbag_tokens, moonbag_sold_at, moonbag_sold_value
@@ -565,7 +585,7 @@ class Database:
             """
             SELECT token_address, eligible_first_at, eligible_first_metrics, last_seen_metrics,
                    called_price_usd, max_price_usd, min_price_usd, max_market_cap,
-                   recouped_at, post_alert_price_usd, post_alert_at,
+                   recouped_at, stoploss_at, stoploss_price_usd, post_alert_price_usd, post_alert_at,
                    above_target_started_at, above_target_last_at, above_target_total_sec, sim_taken,
                    sim_position_usd, moonbag_tokens, moonbag_sold_at
             FROM tokens
@@ -589,6 +609,8 @@ class Database:
         min_price_usd: Optional[float],
         max_market_cap: Optional[float],
         recouped_at: Optional[int],
+        stoploss_at: Optional[int],
+        stoploss_price_usd: Optional[float],
         post_alert_price_usd: Optional[float],
         post_alert_at: Optional[int],
         above_target_started_at: Optional[int],
@@ -605,6 +627,8 @@ class Database:
                 min_price_usd = ?,
                 max_market_cap = ?,
                 recouped_at = ?,
+                stoploss_at = ?,
+                stoploss_price_usd = ?,
                 post_alert_price_usd = ?,
                 post_alert_at = ?,
                 above_target_started_at = ?,
@@ -619,6 +643,8 @@ class Database:
                 min_price_usd,
                 max_market_cap,
                 recouped_at,
+                stoploss_at,
+                stoploss_price_usd,
                 post_alert_price_usd,
                 post_alert_at,
                 above_target_started_at,
@@ -759,8 +785,10 @@ class Database:
             SELECT token_address, eligible_first_at, eligible_first_metrics,
                    last_seen_metrics, last_name, last_symbol,
                    called_price_usd, max_price_usd, min_price_usd, max_market_cap, recouped_at,
+                   stoploss_at, stoploss_price_usd,
                    post_alert_price_usd, post_alert_at, above_target_total_sec,
-                   sim_taken, sim_cash_before, sim_cash_after, sim_position_usd, sim_ape_pct
+                   sim_taken, sim_cash_before, sim_cash_after, sim_position_usd, sim_ape_pct,
+                   moonbag_tokens, moonbag_sold_at, moonbag_sold_value
             FROM tokens
             WHERE eligible_first_at IS NOT NULL
               AND eligible_first_at >= ?

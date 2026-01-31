@@ -14,6 +14,7 @@ from .config import load_config
 from .db import Database
 from .dexscreener import DexscreenerClient
 from .discovery import DiscoveryEngine
+from .http_server import start_http_server, stop_http_server
 from .logger import setup_logging
 from .scheduler import Scanner, PERFORMANCE_REFRESH_INTERVAL_SEC
 from .types import AppContext
@@ -88,6 +89,8 @@ def main() -> None:
             asyncio.create_task(send_startup_animation_to_chat(application.bot, chat_id))
         application.bot_data["perf_job"] = perf_job
         asyncio.create_task(scanner.backfill_called_prices())
+        http_runner = await start_http_server(app_ctx, logger)
+        application.bot_data["http_runner"] = http_runner
         logger.info(
             "bot_ready",
             extra={
@@ -109,6 +112,9 @@ def main() -> None:
         perf_job = application.bot_data.get("perf_job")
         if perf_job:
             perf_job.schedule_removal()
+        http_runner = application.bot_data.get("http_runner")
+        if http_runner:
+            await stop_http_server(http_runner)
         app_ctx = application.bot_data.get("app_ctx")
         if app_ctx:
             await app_ctx.session.close()

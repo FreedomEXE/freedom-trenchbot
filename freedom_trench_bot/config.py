@@ -52,6 +52,7 @@ class Config:
     sim_start_balance: float
     sim_position_size: float
     sim_target_multiple: float
+    sim_stop_multiple: float
     sim_buy_fee_pct: float
     sim_sell_fee_pct: float
     sim_slippage_sample_sec: int
@@ -124,6 +125,7 @@ def load_config() -> Config:
     sim_start_balance = float(os.getenv("SIM_START_BALANCE", "100"))
     sim_position_size = float(os.getenv("SIM_POSITION_SIZE", "1"))
     sim_target_multiple = float(os.getenv("SIM_TARGET_MULTIPLE", "1.3"))
+    sim_stop_multiple = float(os.getenv("SIM_STOP_MULTIPLE", "0.5"))
     sim_buy_fee_pct = float(os.getenv("SIM_BUY_FEE_PCT", "1.0"))
     sim_sell_fee_pct = float(os.getenv("SIM_SELL_FEE_PCT", "1.0"))
     sim_slippage_sample_sec = int(os.getenv("SIM_SLIPPAGE_SAMPLE_SEC", "30"))
@@ -188,6 +190,7 @@ def load_config() -> Config:
         sim_start_balance=sim_start_balance,
         sim_position_size=sim_position_size,
         sim_target_multiple=sim_target_multiple,
+        sim_stop_multiple=sim_stop_multiple,
         sim_buy_fee_pct=sim_buy_fee_pct,
         sim_sell_fee_pct=sim_sell_fee_pct,
         sim_slippage_sample_sec=sim_slippage_sample_sec,
