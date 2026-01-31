@@ -6,6 +6,8 @@ import heapq
 import io
 import json
 import statistics
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from types import SimpleNamespace
 from typing import Any, Dict, Optional
 
@@ -68,6 +70,7 @@ HELP_TEXT = (
     "/performance - simulation summary (since reset by default)\n"
     "/archive - archive summary before reset (all-time)\n"
     "/moonbag - list moonbag holdings (admin only)\n"
+    "/runstart [YYYY-MM-DD or ISO or unix_ts] - set current run start (admin only)\n"
     "/filters - current filters\n"
     "/health - health summary (admin only)\n"
     "/pause - pause monitoring (admin only)\n"
@@ -237,6 +240,39 @@ def _format_price(value: Optional[float]) -> str:
     if value is None:
         return "n/a"
     return f"${value:,.8f}".rstrip("0").rstrip(".")
+
+
+async def _get_effective_window_start(ctx: AppContext) -> int:
+    run_start = await ctx.db.get_state_int("sim_run_start_at", 0)
+    if run_start:
+        return run_start
+    return await ctx.db.get_state_int("sim_reset_at", 0)
+
+
+def _parse_runstart_arg(raw: str, tz_name: str) -> Optional[int]:
+    raw = raw.strip()
+    if not raw:
+        return None
+    if raw.isdigit():
+        try:
+            return int(raw)
+        except ValueError:
+            return None
+    try:
+        value = raw.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(value)
+    except ValueError:
+        try:
+            dt = datetime.strptime(raw, "%Y-%m-%d")
+        except ValueError:
+            return None
+    if dt.tzinfo is None:
+        try:
+            tz = ZoneInfo(tz_name)
+        except Exception:
+            tz = timezone.utc
+        dt = dt.replace(tzinfo=tz)
+    return int(dt.timestamp())
 
 
 def format_called_stats(rows, tz_name: str, retention_sec: int, limit: int, sim_settings) -> str:
@@ -1355,11 +1391,20 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if ctx is None:
         await update.effective_message.reply_text("Bot is starting, try again in a moment.")
         return
-    reset_at = await ctx.db.get_state_int("sim_reset_at", 0)
+    reset_at = await _get_effective_window_start(ctx)
     rows = await ctx.db.get_called_for_performance(PERFORMANCE_EXPORT_LIMIT, reset_at or None)
+    used_reset = bool(reset_at)
+    if reset_at and not rows:
+        total_all = await ctx.db.count_called_since(None)
+        if total_all:
+            rows = await ctx.db.get_called_for_performance(PERFORMANCE_EXPORT_LIMIT, None)
+            used_reset = False
     sim_settings = await get_sim_settings(ctx)
     sim_cash = await ctx.db.get_state_float("sim_cash", sim_settings.sim_start_balance)
-    text = format_account_stats(rows, ctx.config.display_timezone, sim_settings, reset_at, sim_cash)
+    effective_reset = reset_at if used_reset else 0
+    text = format_account_stats(rows, ctx.config.display_timezone, sim_settings, effective_reset, sim_cash)
+    if reset_at and not used_reset:
+        text += "\nNote: no calls since run start yet; showing all-time."
     await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML)
 
 
@@ -1372,9 +1417,9 @@ async def cmd_performance(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     min_first_at = None
     window_label = "all-time"
     export = False
-    reset_at = await ctx.db.get_state_int("sim_reset_at", 0)
+    reset_at = await _get_effective_window_start(ctx)
     if not context.args and reset_at:
-        window_label = "since reset"
+        window_label = "since run start"
     if context.args:
         for raw in context.args:
             arg = raw.strip().lower()
@@ -1398,9 +1443,18 @@ async def cmd_performance(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 window_label = f"last {format_duration(duration)}"
 
     effective_min = min_first_at
+    used_reset = False
     if reset_at and (effective_min is None or reset_at > effective_min):
         effective_min = reset_at
+        used_reset = True
     total_calls = await ctx.db.count_called_since(effective_min)
+    if used_reset and total_calls == 0:
+        total_all = await ctx.db.count_called_since(None)
+        if total_all:
+            effective_min = None
+            window_label = "all-time"
+            total_calls = total_all
+            used_reset = False
     limit = PERFORMANCE_EXPORT_LIMIT if export else PERFORMANCE_SUMMARY_LIMIT
     rows = await ctx.db.get_called_for_performance(limit, effective_min)
     sim_settings = await get_sim_settings(ctx)
@@ -1411,8 +1465,10 @@ async def cmd_performance(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         total_calls,
         limit,
         sim_settings,
-        reset_at,
+        reset_at if used_reset else 0,
     )
+    if reset_at and not used_reset:
+        text += "\nNote: no calls since run start yet; showing all-time."
     await update.effective_message.reply_text(
         text,
         parse_mode=ParseMode.HTML,
@@ -1488,15 +1544,22 @@ async def cmd_moonbag(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await update.effective_message.reply_text("Admin only.")
         return
     now = utc_now_ts()
-    reset_at = await ctx.db.get_state_int("sim_reset_at", 0)
+    reset_at = await _get_effective_window_start(ctx)
     rows = await ctx.db.get_called_for_performance(PERFORMANCE_EXPORT_LIMIT, reset_at or None)
+    used_reset = bool(reset_at)
+    if reset_at and not rows:
+        total_all = await ctx.db.count_called_since(None)
+        if total_all:
+            rows = await ctx.db.get_called_for_performance(PERFORMANCE_EXPORT_LIMIT, None)
+            used_reset = False
     sim_settings = await get_sim_settings(ctx)
+    effective_reset = reset_at if used_reset else 0
     lines = [f"<pre>{WELCOME_HEADER}</pre>", "Moonbag Holdings"]
     buttons = []
     total_value = 0.0
     any_holdings = False
     for row in rows:
-        if reset_at and (row["eligible_first_at"] or 0) < reset_at:
+        if effective_reset and (row["eligible_first_at"] or 0) < effective_reset:
             continue
         if not row["sim_taken"]:
             continue
@@ -1523,6 +1586,8 @@ async def cmd_moonbag(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     lines.append(f"Total value: {_format_usd2(total_value)}")
     if not any_holdings:
         lines.append("No moonbags yet.")
+    if reset_at and not used_reset:
+        lines.append("Note: no calls since run start yet; showing all-time.")
     if buttons:
         buttons.append([InlineKeyboardButton("Sell All", callback_data="moonbag:sell_all")])
     await update.effective_message.reply_text(
@@ -1623,6 +1688,29 @@ async def cmd_reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await ctx.db.set_state("sim_cash", str(ctx.config.sim_start_balance))
     await update.effective_message.reply_text(
         f"Simulation reset at {format_ts(reset_at, ctx.config.display_timezone)}"
+    )
+
+
+async def cmd_runstart(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    ctx = get_app_ctx(context)
+    if ctx is None:
+        await update.effective_message.reply_text("Bot is starting, try again in a moment.")
+        return
+    if not await is_admin(update, context, ctx):
+        await update.effective_message.reply_text("Admin only.")
+        return
+    run_start = utc_now_ts()
+    if context.args:
+        parsed = _parse_runstart_arg(" ".join(context.args), ctx.config.display_timezone)
+        if parsed is None:
+            await update.effective_message.reply_text(
+                "Usage: /runstart [YYYY-MM-DD | ISO | unix_ts]"
+            )
+            return
+        run_start = parsed
+    await ctx.db.set_state("sim_run_start_at", str(run_start))
+    await update.effective_message.reply_text(
+        f"Run start set to {format_ts(run_start, ctx.config.display_timezone)}"
     )
 
 
@@ -1792,6 +1880,7 @@ def register_handlers(application: Application) -> None:
     application.add_handler(CommandHandler("performance", cmd_performance))
     application.add_handler(CommandHandler("archive", cmd_archive))
     application.add_handler(CommandHandler("moonbag", cmd_moonbag))
+    application.add_handler(CommandHandler("runstart", cmd_runstart))
     application.add_handler(CommandHandler("filters", cmd_filters))
     application.add_handler(CommandHandler("health", cmd_health))
     application.add_handler(CommandHandler("pause", cmd_pause))
