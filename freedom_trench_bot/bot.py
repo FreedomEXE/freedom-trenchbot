@@ -847,9 +847,9 @@ def format_performance_summary(
                 taken_count += 1
                 if row["recouped_at"]:
                     heapq.heappush(cash_events, (row["recouped_at"], position_size))
-                elif row.get("stoploss_at"):
+                elif row["stoploss_at"]:
                     entry_price = _entry_price_from_row(row)
-                    stop_price = row.get("stoploss_price_usd")
+                    stop_price = row["stoploss_price_usd"]
                     if entry_price and stop_price:
                         buy_fee = max(0.0, sim_settings.sim_buy_fee_pct) / 100.0
                         sell_fee = max(0.0, sim_settings.sim_sell_fee_pct) / 100.0
@@ -867,9 +867,9 @@ def format_performance_summary(
                 taken_count += 1
                 if row["recouped_at"]:
                     heapq.heappush(cash_events, (row["recouped_at"], position_size))
-                elif row.get("stoploss_at"):
+                elif row["stoploss_at"]:
                     entry_price = _entry_price_from_row(row)
-                    stop_price = row.get("stoploss_price_usd")
+                    stop_price = row["stoploss_price_usd"]
                     if entry_price and stop_price:
                         buy_fee = max(0.0, sim_settings.sim_buy_fee_pct) / 100.0
                         sell_fee = max(0.0, sim_settings.sim_sell_fee_pct) / 100.0
@@ -1123,8 +1123,8 @@ def build_performance_csv(rows, tz_name: str, sim_settings) -> bytes:
                 f"{max_multiple:.2f}" if max_multiple is not None else "",
                 f"{min_multiple:.2f}" if min_multiple is not None else "",
                 format_ts(row["recouped_at"], tz_name),
-                format_ts(row.get("stoploss_at"), tz_name),
-                row.get("stoploss_price_usd") if row.get("stoploss_price_usd") is not None else "",
+                format_ts(row["stoploss_at"], tz_name),
+                row["stoploss_price_usd"] if row["stoploss_price_usd"] is not None else "",
                 row["post_alert_price_usd"] if row["post_alert_price_usd"] is not None else "",
                 format_ts(row["post_alert_at"], tz_name),
                 f"{slippage_pct:.2f}" if slippage_pct is not None else "",
