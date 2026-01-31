@@ -56,6 +56,14 @@ class Database:
                 moonbag_tokens REAL,
                 moonbag_sold_at INTEGER,
                 moonbag_sold_value REAL,
+                stardust_tokens REAL,
+                stardust_sold_at INTEGER,
+                stardust_sold_value REAL,
+                exec_price_usd REAL,
+                exec_price_at INTEGER,
+                exec_slippage_pct REAL,
+                exec_bleed_usd REAL,
+                exec_value_usd REAL,
                 wallet_analysis_at INTEGER,
                 wallet_analysis_json TEXT,
                 wallet_analysis_partial INTEGER,
@@ -101,6 +109,14 @@ class Database:
         await self._ensure_column("tokens", "moonbag_tokens", "REAL")
         await self._ensure_column("tokens", "moonbag_sold_at", "INTEGER")
         await self._ensure_column("tokens", "moonbag_sold_value", "REAL")
+        await self._ensure_column("tokens", "stardust_tokens", "REAL")
+        await self._ensure_column("tokens", "stardust_sold_at", "INTEGER")
+        await self._ensure_column("tokens", "stardust_sold_value", "REAL")
+        await self._ensure_column("tokens", "exec_price_usd", "REAL")
+        await self._ensure_column("tokens", "exec_price_at", "INTEGER")
+        await self._ensure_column("tokens", "exec_slippage_pct", "REAL")
+        await self._ensure_column("tokens", "exec_bleed_usd", "REAL")
+        await self._ensure_column("tokens", "exec_value_usd", "REAL")
         await self._ensure_column("tokens", "wallet_analysis_at", "INTEGER")
         await self._ensure_column("tokens", "wallet_analysis_json", "TEXT")
         await self._ensure_column("tokens", "wallet_analysis_partial", "INTEGER")
@@ -345,6 +361,26 @@ class Database:
         )
         await self.conn.commit()
 
+    async def update_stardust_state(
+        self,
+        token_address: str,
+        stardust_tokens: Optional[float],
+        stardust_sold_at: Optional[int],
+        stardust_sold_value: Optional[float],
+    ) -> None:
+        assert self.conn is not None
+        await self.conn.execute(
+            """
+            UPDATE tokens
+            SET stardust_tokens = ?,
+                stardust_sold_at = ?,
+                stardust_sold_value = ?
+            WHERE token_address = ?
+            """,
+            (stardust_tokens, stardust_sold_at, stardust_sold_value, token_address),
+        )
+        await self.conn.commit()
+
     async def update_stoploss_state(
         self,
         token_address: str,
@@ -414,7 +450,8 @@ class Database:
                    stoploss_at, stoploss_price_usd,
                    post_alert_price_usd, post_alert_at, above_target_started_at,
                    above_target_last_at, above_target_total_sec, sim_taken,
-                   sim_position_usd, moonbag_tokens, moonbag_sold_at
+                   sim_position_usd, moonbag_tokens, moonbag_sold_at,
+                   stardust_tokens, stardust_sold_at
             FROM tokens
             WHERE eligible_first_at IS NOT NULL
               AND called_price_usd IS NULL
@@ -491,7 +528,9 @@ class Database:
                        stoploss_at, stoploss_price_usd,
                        post_alert_price_usd, post_alert_at, above_target_total_sec,
                        sim_taken, sim_cash_before, sim_cash_after, sim_position_usd, sim_ape_pct,
-                       moonbag_tokens, moonbag_sold_at, moonbag_sold_value
+                       moonbag_tokens, moonbag_sold_at, moonbag_sold_value,
+                       stardust_tokens, stardust_sold_at, stardust_sold_value,
+                       exec_price_usd, exec_price_at, exec_slippage_pct, exec_bleed_usd, exec_value_usd
                 FROM tokens
                 WHERE eligible_first_at IS NOT NULL
                 ORDER BY eligible_first_at DESC
@@ -508,7 +547,9 @@ class Database:
                        stoploss_at, stoploss_price_usd,
                        post_alert_price_usd, post_alert_at, above_target_total_sec,
                        sim_taken, sim_cash_before, sim_cash_after, sim_position_usd, sim_ape_pct,
-                       moonbag_tokens, moonbag_sold_at, moonbag_sold_value
+                       moonbag_tokens, moonbag_sold_at, moonbag_sold_value,
+                       stardust_tokens, stardust_sold_at, stardust_sold_value,
+                       exec_price_usd, exec_price_at, exec_slippage_pct, exec_bleed_usd, exec_value_usd
                 FROM tokens
                 WHERE eligible_first_at IS NOT NULL
                   AND eligible_first_at >= ?
@@ -582,7 +623,9 @@ class Database:
                    stoploss_at, stoploss_price_usd,
                    post_alert_price_usd, post_alert_at, above_target_total_sec,
                    sim_taken, sim_cash_before, sim_cash_after, sim_position_usd, sim_ape_pct,
-                   moonbag_tokens, moonbag_sold_at, moonbag_sold_value
+                   moonbag_tokens, moonbag_sold_at, moonbag_sold_value,
+                   stardust_tokens, stardust_sold_at, stardust_sold_value,
+                   exec_price_usd, exec_price_at, exec_slippage_pct, exec_bleed_usd, exec_value_usd
             FROM tokens
             WHERE eligible_first_at IS NOT NULL
               AND eligible_first_at < ?
@@ -605,7 +648,8 @@ class Database:
                    called_price_usd, max_price_usd, min_price_usd, max_market_cap,
                    recouped_at, stoploss_at, stoploss_price_usd, post_alert_price_usd, post_alert_at,
                    above_target_started_at, above_target_last_at, above_target_total_sec, sim_taken,
-                   sim_position_usd, moonbag_tokens, moonbag_sold_at
+                   sim_position_usd, moonbag_tokens, moonbag_sold_at, stardust_tokens, stardust_sold_at,
+                   exec_price_usd, exec_price_at, exec_slippage_pct, exec_bleed_usd, exec_value_usd
             FROM tokens
             WHERE eligible_first_at IS NOT NULL
               AND eligible_first_at >= ?
@@ -634,6 +678,11 @@ class Database:
         above_target_started_at: Optional[int],
         above_target_last_at: Optional[int],
         above_target_total_sec: Optional[int],
+        exec_price_usd: Optional[float],
+        exec_price_at: Optional[int],
+        exec_slippage_pct: Optional[float],
+        exec_bleed_usd: Optional[float],
+        exec_value_usd: Optional[float],
     ) -> None:
         assert self.conn is not None
         await self.conn.execute(
@@ -651,7 +700,12 @@ class Database:
                 post_alert_at = ?,
                 above_target_started_at = ?,
                 above_target_last_at = ?,
-                above_target_total_sec = ?
+                above_target_total_sec = ?,
+                exec_price_usd = ?,
+                exec_price_at = ?,
+                exec_slippage_pct = ?,
+                exec_bleed_usd = ?,
+                exec_value_usd = ?
             WHERE token_address = ?
             """,
             (
@@ -668,6 +722,11 @@ class Database:
                 above_target_started_at,
                 above_target_last_at,
                 above_target_total_sec,
+                exec_price_usd,
+                exec_price_at,
+                exec_slippage_pct,
+                exec_bleed_usd,
+                exec_value_usd,
                 token_address,
             ),
         )

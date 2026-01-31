@@ -71,6 +71,7 @@ HELP_TEXT = (
     "/performance - simulation summary (since reset by default)\n"
     "/archive - archive summary before reset (all-time)\n"
     "/moonbag - list moonbag holdings (admin only)\n"
+    "/stardust - list stardust holdings (admin only)\n"
     "/runstart [YYYY-MM-DD or ISO or unix_ts] - set current run start (admin only)\n"
     "/filters - current filters\n"
     "/health - health summary (admin only)\n"
@@ -780,13 +781,18 @@ def _compute_sim_row(row, config) -> Dict[str, Any]:
 
     moonbag_tokens = row["moonbag_tokens"]
     moonbag_sold_at = row["moonbag_sold_at"]
+    stardust_tokens = row["stardust_tokens"]
+    stardust_sold_at = row["stardust_sold_at"]
     tokens_remaining = None
     if tokens_bought is not None:
         if stoploss_at:
             tokens_remaining = 0.0
         elif recouped:
             if moonbag_sold_at:
-                tokens_remaining = 0.0
+                if stardust_tokens is not None and not stardust_sold_at:
+                    tokens_remaining = stardust_tokens
+                else:
+                    tokens_remaining = 0.0
             elif moonbag_tokens is not None:
                 tokens_remaining = moonbag_tokens
             elif recoup_possible and moonbag_tokens is not None:
@@ -826,6 +832,13 @@ def _compute_sim_row(row, config) -> Dict[str, Any]:
         "tokens_bought": tokens_bought,
         "moonbag_tokens": moonbag_tokens,
         "moonbag_sold_at": moonbag_sold_at,
+        "stardust_tokens": stardust_tokens,
+        "stardust_sold_at": stardust_sold_at,
+        "exec_price_usd": _row_value("exec_price_usd"),
+        "exec_price_at": _row_value("exec_price_at"),
+        "exec_slippage_pct": _row_value("exec_slippage_pct"),
+        "exec_bleed_usd": _row_value("exec_bleed_usd"),
+        "exec_value_usd": _row_value("exec_value_usd"),
         "current_value": current_value,
     }
 
@@ -925,6 +938,8 @@ def format_performance_summary(
     recoup_times: list[int] = []
     above_target_times: list[int] = []
     slippage_samples: list[float] = []
+    exec_slippage_samples: list[float] = []
+    exec_bleed_total = 0.0
     moonbag_10x = 0
     moonbag_100x = 0
     moonbag_1000x = 0
@@ -966,6 +981,10 @@ def format_performance_summary(
             above_target_times.append(int(sim["above_target_total_sec"]))
         if sim["slippage_pct"] is not None:
             slippage_samples.append(sim["slippage_pct"])
+        if sim.get("exec_slippage_pct") is not None:
+            exec_slippage_samples.append(sim["exec_slippage_pct"])
+        if sim.get("exec_bleed_usd") is not None:
+            exec_bleed_total += sim["exec_bleed_usd"]
 
         if taken_flags.get(row["token_address"]):
             current_value = sim["current_value"]
@@ -1005,6 +1024,11 @@ def format_performance_summary(
             lines.append(f"Median time above target: {format_duration(int(median_above))}")
         if median_slip is not None:
             lines.append(f"Median slippage (post-alert): {format_pct(median_slip)}")
+        if exec_slippage_samples:
+            median_exec_slip = statistics.median(exec_slippage_samples)
+            lines.append(f"Median exec slippage: {format_pct(median_exec_slip)}")
+        if exec_bleed_total:
+            lines.append(f"Exec bleed (est): {_format_usd2(exec_bleed_total)}")
         lines.append(
             f"Moonbags: 10x {moonbag_10x} | 100x {moonbag_100x} | 1000x {moonbag_1000x}"
         )
@@ -1122,6 +1146,11 @@ def build_performance_csv(rows, tz_name: str, sim_settings) -> bytes:
             "post_alert_at",
             "slippage_pct",
             "above_target_total_sec",
+            "exec_price_usd",
+            "exec_price_at",
+            "exec_slippage_pct",
+            "exec_bleed_usd",
+            "exec_value_usd",
         ]
     )
     for row in rows:
@@ -1155,6 +1184,11 @@ def build_performance_csv(rows, tz_name: str, sim_settings) -> bytes:
                 format_ts(row["post_alert_at"], tz_name),
                 f"{slippage_pct:.2f}" if slippage_pct is not None else "",
                 above_target_total_sec if above_target_total_sec else "",
+                sim.get("exec_price_usd") if sim.get("exec_price_usd") is not None else "",
+                format_ts(sim.get("exec_price_at"), tz_name) if sim.get("exec_price_at") else "",
+                f"{sim.get('exec_slippage_pct'):.2f}" if sim.get("exec_slippage_pct") is not None else "",
+                sim.get("exec_bleed_usd") if sim.get("exec_bleed_usd") is not None else "",
+                sim.get("exec_value_usd") if sim.get("exec_value_usd") is not None else "",
             ]
         )
     return output.getvalue().encode("utf-8")
@@ -1181,6 +1215,7 @@ def format_account_stats(rows, tz_name: str, sim_settings, reset_at: int, sim_ca
     taken = 0
     recouped = 0
     stopped = 0
+    exec_bleed_total = 0.0
     for row in rows:
         if reset_at and (row["eligible_first_at"] or 0) < reset_at:
             continue
@@ -1195,6 +1230,8 @@ def format_account_stats(rows, tz_name: str, sim_settings, reset_at: int, sim_ca
         current_value = sim["current_value"]
         if current_value is not None:
             equity += current_value
+        if sim.get("exec_bleed_usd") is not None:
+            exec_bleed_total += sim["exec_bleed_usd"]
     roi = None
     if sim_settings.sim_start_balance:
         roi = ((equity / sim_settings.sim_start_balance) - 1.0) * 100.0
@@ -1207,6 +1244,8 @@ def format_account_stats(rows, tz_name: str, sim_settings, reset_at: int, sim_ca
         f"ROI: {format_pct(roi)}",
         f"Taken: {taken} | Recouped: {recouped} | Stopped: {stopped}",
     ]
+    if exec_bleed_total:
+        lines.append(f"Exec bleed (est): {_format_usd2(exec_bleed_total)}")
     if reset_at:
         lines.append(f"Reset: {format_ts(reset_at, tz_name)}")
     return "\n".join(lines)
@@ -1276,6 +1315,7 @@ def format_status(
         ),
         f"Sim cash: {_format_usd2(sim_cash)}",
         trail_line,
+        f"Executable pricing: {'on' if ctx.config.exec_price_enabled else 'off'}",
         "Filters:",
         format_filters(ctx),
     ]
@@ -1663,6 +1703,80 @@ async def cmd_moonbag(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     )
 
 
+async def cmd_stardust(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    ctx = get_app_ctx(context)
+    if ctx is None:
+        await update.effective_message.reply_text("Bot is starting, try again in a moment.")
+        return
+    if not await is_admin(update, context, ctx):
+        await update.effective_message.reply_text("Admin only.")
+        return
+    run_start = await ctx.db.get_state_int("sim_run_start_at", 0)
+    reset_at = await _get_effective_window_start(ctx)
+    rows = await ctx.db.get_called_for_performance(PERFORMANCE_EXPORT_LIMIT, reset_at or None)
+    used_reset = bool(reset_at)
+    if run_start and not rows:
+        lines = [f"<pre>{WELCOME_HEADER}</pre>", "Stardust Holdings", "No calls since run start."]
+        await update.effective_message.reply_text(
+            "\n".join(lines),
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True,
+        )
+        return
+    sim_settings = await get_sim_settings(ctx)
+    effective_reset = reset_at if used_reset else 0
+    lines = [f"<pre>{WELCOME_HEADER}</pre>", "Stardust Holdings"]
+    buttons = []
+    total_value = 0.0
+    any_holdings = False
+    sell_fee = max(0.0, sim_settings.sim_sell_fee_pct) / 100.0
+    net_exit = 1.0 - sell_fee
+    if net_exit < 0:
+        net_exit = 0.0
+    for row in rows:
+        if effective_reset and (row["eligible_first_at"] or 0) < effective_reset:
+            continue
+        if not row["sim_taken"]:
+            continue
+        if row["stardust_sold_at"]:
+            continue
+        if not row["stardust_tokens"]:
+            continue
+        sim = _compute_sim_row(row, sim_settings)
+        current_price = sim["current_price"] or sim["entry_price"]
+        if current_price is None:
+            continue
+        any_holdings = True
+        current_value = row["stardust_tokens"] * current_price * net_exit
+        name = escape_html(row["last_name"] or "Unknown")
+        symbol = escape_html(row["last_symbol"] or "?")
+        lines.append(f"{name} ({symbol})")
+        lines.append(f"CA: <code>{escape_html(row['token_address'])}</code>")
+        if sim["current_multiple"] is not None:
+            lines.append(f"Now: {_format_multiple(sim['current_multiple'])}")
+        total_value += current_value
+        lines.append(f"Value: {_format_usd2(current_value)}")
+        lines.append("")
+        buttons.append(
+            [
+                InlineKeyboardButton(
+                    f"Sell {symbol}", callback_data=f"stardust:sell:{row['token_address']}"
+                )
+            ]
+        )
+    lines.append(f"Total value: {_format_usd2(total_value)}")
+    if not any_holdings:
+        lines.append("No stardust yet.")
+    if buttons:
+        buttons.append([InlineKeyboardButton("Sell All", callback_data="stardust:sell_all")])
+    await update.effective_message.reply_text(
+        "\n".join(lines).strip(),
+        parse_mode=ParseMode.HTML,
+        disable_web_page_preview=True,
+        reply_markup=InlineKeyboardMarkup(buttons) if buttons else None,
+    )
+
+
 async def cmd_health(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     ctx = get_app_ctx(context)
     if ctx is None:
@@ -1930,6 +2044,73 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             )
             return
 
+    if data.startswith("stardust:"):
+        if not await is_admin(update, context, ctx):
+            await query.answer("Admin only", show_alert=True)
+            return
+        parts = data.split(":")
+        sim_settings = await get_sim_settings(ctx)
+        sim_cash = await ctx.db.get_state_float("sim_cash", sim_settings.sim_start_balance)
+        sell_fee = max(0.0, sim_settings.sim_sell_fee_pct) / 100.0
+        net_exit = 1.0 - sell_fee
+        if net_exit < 0:
+            net_exit = 0.0
+        if len(parts) >= 2 and parts[1] == "sell_all":
+            reset_at = await _get_effective_window_start(ctx)
+            rows = await ctx.db.get_called_for_performance(PERFORMANCE_EXPORT_LIMIT, reset_at or None)
+            sold_total = 0.0
+            now = utc_now_ts()
+            for row in rows:
+                if reset_at and (row["eligible_first_at"] or 0) < reset_at:
+                    continue
+                if not row["stardust_tokens"] or row["stardust_sold_at"]:
+                    continue
+                sim = _compute_sim_row(row, sim_settings)
+                current_price = sim["current_price"] or sim["entry_price"]
+                if current_price is None:
+                    continue
+                current_value = row["stardust_tokens"] * current_price * net_exit
+                sold_total += current_value
+                await ctx.db.update_stardust_state(
+                    token_address=row["token_address"],
+                    stardust_tokens=row["stardust_tokens"],
+                    stardust_sold_at=now,
+                    stardust_sold_value=current_value,
+                )
+            sim_cash += sold_total
+            await ctx.db.set_state("sim_cash", str(sim_cash))
+            await query.message.reply_text(
+                f"Sold all stardust for {_format_usd2(sold_total)}. Cash: {_format_usd2(sim_cash)}"
+            )
+            return
+        if len(parts) >= 3 and parts[1] == "sell":
+            token_address = parts[2]
+            row = await ctx.db.get_token(token_address)
+            if row is None:
+                await query.message.reply_text("Stardust not found.")
+                return
+            if not row["stardust_tokens"] or row["stardust_sold_at"]:
+                await query.message.reply_text("No stardust to sell.")
+                return
+            sim = _compute_sim_row(row, sim_settings)
+            current_price = sim["current_price"] or sim["entry_price"]
+            if current_price is None:
+                await query.message.reply_text("Stardust price unavailable.")
+                return
+            current_value = row["stardust_tokens"] * current_price * net_exit
+            await ctx.db.update_stardust_state(
+                token_address=token_address,
+                stardust_tokens=row["stardust_tokens"],
+                stardust_sold_at=utc_now_ts(),
+                stardust_sold_value=current_value,
+            )
+            sim_cash += current_value
+            await ctx.db.set_state("sim_cash", str(sim_cash))
+            await query.message.reply_text(
+                f"Sold stardust for {_format_usd2(current_value)}. Cash: {_format_usd2(sim_cash)}"
+            )
+            return
+
     if data == "settings":
         await query.message.reply_text(
             f"<pre>{WELCOME_HEADER}</pre>\n{format_filters(ctx)}",
@@ -1952,6 +2133,7 @@ def register_handlers(application: Application) -> None:
     application.add_handler(CommandHandler("performance", cmd_performance))
     application.add_handler(CommandHandler("archive", cmd_archive))
     application.add_handler(CommandHandler("moonbag", cmd_moonbag))
+    application.add_handler(CommandHandler("stardust", cmd_stardust))
     application.add_handler(CommandHandler("runstart", cmd_runstart))
     application.add_handler(CommandHandler("filters", cmd_filters))
     application.add_handler(CommandHandler("health", cmd_health))

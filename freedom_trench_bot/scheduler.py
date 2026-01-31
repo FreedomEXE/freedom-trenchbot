@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
+from decimal import Decimal, InvalidOperation, ROUND_DOWN
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -25,6 +27,28 @@ PERFORMANCE_LOOKBACK_DAYS = 7
 PERFORMANCE_REFRESH_INTERVAL_SEC = 300
 PERFORMANCE_BATCH_SIZE = 50
 EQUITY_TRAIL_ROW_LIMIT = 50000
+
+
+class _TTLCache:
+    def __init__(self, ttl_sec: int, max_size: int = 1024) -> None:
+        self.ttl_sec = ttl_sec
+        self.max_size = max_size
+        self._store: Dict[str, Tuple[float, Any]] = {}
+
+    def get(self, key: str) -> Optional[Any]:
+        item = self._store.get(key)
+        if not item:
+            return None
+        expires_at, value = item
+        if expires_at < time.monotonic():
+            self._store.pop(key, None)
+            return None
+        return value
+
+    def set(self, key: str, value: Any) -> None:
+        if len(self._store) >= self.max_size:
+            self._store.pop(next(iter(self._store)))
+        self._store[key] = (time.monotonic() + self.ttl_sec, value)
 
 
 def _pair_sort_key(pair: Dict[str, Any]) -> float:
@@ -148,6 +172,19 @@ def _current_price_from_row(row: Dict[str, Any]) -> Optional[float]:
     return _entry_price_from_row(row)
 
 
+def _quantize_amount(value: float, decimals: int) -> Optional[int]:
+    try:
+        if decimals < 0:
+            return None
+        scale = Decimal(10) ** decimals
+        amt = Decimal(str(value)) * scale
+        if amt <= 0:
+            return None
+        return int(amt.to_integral_value(rounding=ROUND_DOWN))
+    except (InvalidOperation, ValueError):
+        return None
+
+
 def _to_float(value: Any) -> Optional[float]:
     try:
         return float(value)
@@ -194,6 +231,137 @@ class Scanner:
         self._holders_lock = asyncio.Lock()
         self._holders_inflight: set[str] = set()
         self._holders_sem = asyncio.Semaphore(2)
+        self._quote_sem = asyncio.Semaphore(
+            max(1, app_ctx.config.exec_price_max_concurrency)
+        )
+        self._quote_cache = _TTLCache(
+            max(1, app_ctx.config.exec_price_cache_sec), max_size=2048
+        )
+        self._token_cache: Dict[str, int] = {}
+        self._token_cache_loaded_at = 0.0
+
+    async def _load_token_list(self) -> None:
+        config = self.ctx.config
+        now = time.monotonic()
+        if (
+            self._token_cache
+            and now - self._token_cache_loaded_at < config.exec_price_token_list_ttl_sec
+        ):
+            return
+        url = config.exec_price_token_list_url
+        if not url:
+            return
+        try:
+            async with self._quote_sem:
+                resp = await self.ctx.session.get(url, headers={"Accept": "application/json"})
+            try:
+                if resp.status != 200:
+                    self.ctx.logger.warning(
+                        "token_list_non_200", extra={"status": resp.status}
+                    )
+                    return
+                data = await resp.json()
+            finally:
+                resp.release()
+            tokens = {}
+            if isinstance(data, list):
+                for item in data:
+                    if not isinstance(item, dict):
+                        continue
+                    mint = item.get("address")
+                    decimals = item.get("decimals")
+                    if mint and isinstance(decimals, int):
+                        tokens[str(mint)] = decimals
+            elif isinstance(data, dict):
+                for item in data.get("tokens", []):
+                    if not isinstance(item, dict):
+                        continue
+                    mint = item.get("address")
+                    decimals = item.get("decimals")
+                    if mint and isinstance(decimals, int):
+                        tokens[str(mint)] = decimals
+            if tokens:
+                self._token_cache = tokens
+                self._token_cache_loaded_at = now
+        except Exception:
+            self.ctx.logger.exception("token_list_fetch_failed")
+
+    async def _get_token_decimals(self, mint: str) -> Optional[int]:
+        if not mint:
+            return None
+        if mint in self._token_cache:
+            return self._token_cache[mint]
+        await self._load_token_list()
+        return self._token_cache.get(mint)
+
+    async def _fetch_quote_out_amount(
+        self, input_mint: str, output_mint: str, amount: int
+    ) -> Optional[int]:
+        config = self.ctx.config
+        if amount <= 0:
+            return None
+        cache_key = f"{input_mint}:{output_mint}:{amount}"
+        cached = self._quote_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        url = config.exec_price_quote_url
+        if not url:
+            return None
+        params = {
+            "inputMint": input_mint,
+            "outputMint": output_mint,
+            "amount": str(amount),
+            "slippageBps": str(max(1, config.exec_price_slippage_bps)),
+        }
+        try:
+            async with self._quote_sem:
+                resp = await self.ctx.session.get(url, params=params)
+            try:
+                if resp.status != 200:
+                    self.ctx.logger.warning(
+                        "quote_non_200",
+                        extra={"status": resp.status, "mint": input_mint},
+                    )
+                    return None
+                data = await resp.json()
+            finally:
+                resp.release()
+            if not isinstance(data, dict):
+                return None
+            out_amount = data.get("outAmount")
+            if out_amount is None:
+                return None
+            try:
+                out_int = int(out_amount)
+            except (TypeError, ValueError):
+                return None
+            if out_int <= 0:
+                return None
+            self._quote_cache.set(cache_key, out_int)
+            return out_int
+        except Exception:
+            self.ctx.logger.exception("quote_fetch_failed", extra={"mint": input_mint})
+            return None
+
+    async def _sell_value_usd_from_quote(
+        self, token_mint: str, token_amount: float
+    ) -> Optional[float]:
+        config = self.ctx.config
+        decimals = await self._get_token_decimals(token_mint)
+        if decimals is None:
+            return None
+        amount = _quantize_amount(token_amount, decimals)
+        if amount is None:
+            return None
+        out_amount = await self._fetch_quote_out_amount(
+            token_mint, config.exec_price_output_mint, amount
+        )
+        if out_amount is None:
+            return None
+        try:
+            return float(out_amount) / float(10 ** config.exec_price_output_decimals)
+        except (TypeError, ValueError, ZeroDivisionError):
+            return None
 
     async def scan_job(self, context) -> None:
         if self._scan_lock.locked():
@@ -408,30 +576,31 @@ class Scanner:
             stoploss_price_usd = token_row["stoploss_price_usd"]
             recouped_just_now = False
             stoploss_just_now = False
-            if (
-                stoploss_at is None
-                and recouped_at is None
-                and token_row["sim_taken"]
-                and called_price_usd
-                and price_usd
-                and called_price_usd > 0
-            ):
-                stop_price = called_price_usd * config.sim_stop_multiple
-                if price_usd <= stop_price:
-                    stoploss_at = now
-                    stoploss_price_usd = price_usd
-                    stoploss_just_now = True
-            if (
-                stoploss_at is None
-                and recouped_at is None
-                and called_price_usd
-                and price_usd
-                and called_price_usd > 0
-            ):
-                target_price = called_price_usd * config.sim_target_multiple
-                if price_usd >= target_price:
-                    recouped_at = now
-                    recouped_just_now = True
+            if not config.exec_price_enabled:
+                if (
+                    stoploss_at is None
+                    and recouped_at is None
+                    and token_row["sim_taken"]
+                    and called_price_usd
+                    and price_usd
+                    and called_price_usd > 0
+                ):
+                    stop_price = called_price_usd * config.sim_stop_multiple
+                    if price_usd <= stop_price:
+                        stoploss_at = now
+                        stoploss_price_usd = price_usd
+                        stoploss_just_now = True
+                if (
+                    stoploss_at is None
+                    and recouped_at is None
+                    and called_price_usd
+                    and price_usd
+                    and called_price_usd > 0
+                ):
+                    target_price = called_price_usd * config.sim_target_multiple
+                    if price_usd >= target_price:
+                        recouped_at = now
+                        recouped_just_now = True
             post_alert_price_usd = token_row["post_alert_price_usd"]
             post_alert_at = token_row["post_alert_at"]
             if (
@@ -668,6 +837,7 @@ class Scanner:
         sim_buy_fee: float,
         sim_sell_fee: float,
         sim_reset_at: int,
+        use_exec_price: bool,
     ) -> Tuple[float, List[Dict[str, Any]], List[Dict[str, Any]]]:
         rows = await self.ctx.db.get_called_for_performance(
             EQUITY_TRAIL_ROW_LIMIT, sim_reset_at or None
@@ -679,6 +849,7 @@ class Scanner:
         if net_exit < 0:
             net_exit = 0.0
 
+        exec_budget = self.ctx.config.exec_price_max_positions
         for row in rows:
             if sim_reset_at and (row["eligible_first_at"] or 0) < sim_reset_at:
                 continue
@@ -697,8 +868,17 @@ class Scanner:
             position_usd = row["sim_position_usd"] or sim_position_size
             tokens_bought = position_usd / (entry_price * (1.0 + sim_buy_fee))
 
+            exec_value = None
+            if use_exec_price and exec_budget > 0:
+                exec_value = await self._sell_value_usd_from_quote(
+                    row["token_address"], tokens_bought
+                )
+                exec_budget -= 1
+
             if row["recouped_at"] is None:
-                current_value = tokens_bought * current_price * net_exit
+                current_value = exec_value
+                if current_value is None:
+                    current_value = tokens_bought * current_price * net_exit
                 equity += current_value
                 open_positions.append(
                     {
@@ -711,16 +891,39 @@ class Scanner:
 
             moonbag_tokens = row["moonbag_tokens"]
             if moonbag_tokens and not row["moonbag_sold_at"]:
-                current_value = moonbag_tokens * current_price * net_exit
+                current_value = None
+                if use_exec_price and exec_budget > 0:
+                    current_value = await self._sell_value_usd_from_quote(
+                        row["token_address"], moonbag_tokens
+                    )
+                    exec_budget -= 1
+                if current_value is None:
+                    current_value = moonbag_tokens * current_price * net_exit
                 equity += current_value
+                stardust_pct = self.ctx.config.sim_stardust_pct
+                sell_value = current_value * (1.0 - stardust_pct)
+                stardust_tokens = moonbag_tokens * stardust_pct
                 moonbag_sales.append(
                     {
                         "token_address": row["token_address"],
                         "current_price": current_price,
                         "moonbag_tokens": moonbag_tokens,
-                        "value": current_value,
+                        "sell_value": sell_value,
+                        "stardust_tokens": stardust_tokens,
                     }
                 )
+
+            stardust_tokens = row["stardust_tokens"]
+            if stardust_tokens and not row["stardust_sold_at"]:
+                stardust_value = None
+                if use_exec_price and exec_budget > 0:
+                    stardust_value = await self._sell_value_usd_from_quote(
+                        row["token_address"], stardust_tokens
+                    )
+                    exec_budget -= 1
+                if stardust_value is None:
+                    stardust_value = stardust_tokens * current_price * net_exit
+                equity += stardust_value
 
         return equity, open_positions, moonbag_sales
 
@@ -750,6 +953,7 @@ class Scanner:
             sim_buy_fee=sim_buy_fee,
             sim_sell_fee=sim_sell_fee,
             sim_reset_at=sim_reset_at,
+            use_exec_price=config.exec_price_enabled,
         )
 
         sim_equity_peak = await self.ctx.db.get_state_float(
@@ -780,7 +984,18 @@ class Scanner:
                 token_address=row["token_address"],
                 moonbag_tokens=row["moonbag_tokens"],
                 moonbag_sold_at=now,
-                moonbag_sold_value=row["value"],
+                moonbag_sold_value=row["sell_value"],
+            )
+            existing = await self.ctx.db.get_token(row["token_address"])
+            existing_tokens = existing["stardust_tokens"] if existing else None
+            total_stardust = row["stardust_tokens"] or 0.0
+            if existing_tokens:
+                total_stardust += existing_tokens
+            await self.ctx.db.update_stardust_state(
+                token_address=row["token_address"],
+                stardust_tokens=total_stardust,
+                stardust_sold_at=None,
+                stardust_sold_value=None,
             )
         for row in open_positions:
             await self.ctx.db.update_stoploss_state(
@@ -789,7 +1004,9 @@ class Scanner:
                 stoploss_price_usd=row["current_price"],
             )
 
-        new_balance = equity
+        new_balance = sim_cash + sum(item["cash_back"] for item in open_positions) + sum(
+            item["sell_value"] for item in moonbag_sales
+        )
         pct = 0.01
         if sim_start_balance > 0:
             pct = sim_position_size / sim_start_balance
@@ -1005,6 +1222,8 @@ class Scanner:
         sim_cash = await self.ctx.db.get_state_float("sim_cash", sim_start_balance)
         sim_buy_fee = self.ctx.config.sim_buy_fee_pct / 100.0
         sim_sell_fee = self.ctx.config.sim_sell_fee_pct / 100.0
+        mute_until = await self.ctx.db.get_state_int("mute_until", 0)
+        muted = mute_until > now
         rows = await self.ctx.db.get_called_for_refresh(PERFORMANCE_BATCH_SIZE, min_first_at)
         if not rows:
             return
@@ -1023,6 +1242,32 @@ class Scanner:
             last_seen_metrics = _metrics_snapshot(pair, metrics)
             price_usd = _to_float(pair.get("priceUsd"))
             called_price_usd = row["called_price_usd"]
+            exec_price_usd: Optional[float] = None
+            exec_price_at: Optional[int] = None
+            exec_slippage_pct: Optional[float] = None
+            exec_bleed_usd: Optional[float] = None
+            exec_value_usd: Optional[float] = None
+            if (
+                self.ctx.config.exec_price_enabled
+                and row["sim_taken"]
+                and called_price_usd
+            ):
+                entry_price = called_price_usd or price_usd
+                position_usd = row["sim_position_usd"] or sim_position_size
+                if entry_price and entry_price > 0:
+                    tokens_bought = position_usd / (entry_price * (1.0 + sim_buy_fee))
+                    exec_value = await self._sell_value_usd_from_quote(
+                        token_address, tokens_bought
+                    )
+                    if exec_value is not None and tokens_bought > 0:
+                        exec_price_usd = exec_value / tokens_bought
+                        exec_price_at = now
+                        exec_value_usd = exec_value
+                        if price_usd:
+                            exec_slippage_pct = ((exec_price_usd / price_usd) - 1.0) * 100.0
+                        if price_usd:
+                            spot_value = tokens_bought * price_usd * (1.0 - sim_sell_fee)
+                            exec_bleed_usd = spot_value - exec_value
             max_price_usd = row["max_price_usd"]
             min_price_usd = row["min_price_usd"]
             if price_usd is not None:
@@ -1037,28 +1282,33 @@ class Scanner:
             recouped_at = row["recouped_at"]
             stoploss_at = row["stoploss_at"]
             stoploss_price_usd = row["stoploss_price_usd"]
+            recouped_just_now = False
+            stoploss_just_now = False
+            effective_price = exec_price_usd if exec_price_usd is not None else price_usd
             if (
                 stoploss_at is None
                 and recouped_at is None
                 and row["sim_taken"]
                 and called_price_usd
-                and price_usd
+                and effective_price
                 and called_price_usd > 0
             ):
                 stop_price = called_price_usd * self.ctx.config.sim_stop_multiple
-                if price_usd <= stop_price:
+                if effective_price <= stop_price:
                     stoploss_at = now
-                    stoploss_price_usd = price_usd
+                    stoploss_price_usd = effective_price
+                    stoploss_just_now = True
             if (
                 stoploss_at is None
                 and recouped_at is None
                 and called_price_usd
-                and price_usd
+                and effective_price
                 and called_price_usd > 0
             ):
                 target_price = called_price_usd * self.ctx.config.sim_target_multiple
-                if price_usd >= target_price:
+                if effective_price >= target_price:
                     recouped_at = now
+                    recouped_just_now = True
             post_alert_price_usd = row["post_alert_price_usd"]
             post_alert_at = row["post_alert_at"]
             if (
@@ -1072,9 +1322,9 @@ class Scanner:
             above_target_started_at = row["above_target_started_at"]
             above_target_last_at = row["above_target_last_at"]
             above_target_total_sec = row["above_target_total_sec"] or 0
-            if called_price_usd and price_usd:
+            if called_price_usd and effective_price:
                 target_price = called_price_usd * self.ctx.config.sim_target_multiple
-                if price_usd >= target_price:
+                if effective_price >= target_price:
                     if above_target_started_at is None:
                         above_target_started_at = now
                     above_target_last_at = now
@@ -1124,6 +1374,77 @@ class Scanner:
                             moonbag_sold_value=None,
                         )
 
+            if (
+                recouped_at
+                and row["moonbag_tokens"]
+                and not row["moonbag_sold_at"]
+                and self.ctx.config.sim_moonbag_hold_sec > 0
+                and now - recouped_at >= self.ctx.config.sim_moonbag_hold_sec
+            ):
+                moonbag_tokens = row["moonbag_tokens"]
+                stardust_pct = self.ctx.config.sim_stardust_pct
+                sell_tokens = moonbag_tokens * (1.0 - stardust_pct)
+                sell_value = None
+                if sell_tokens > 0:
+                    if self.ctx.config.exec_price_enabled:
+                        sell_value = await self._sell_value_usd_from_quote(
+                            token_address, sell_tokens
+                        )
+                    if sell_value is None and effective_price:
+                        sell_value = sell_tokens * effective_price * (1.0 - sim_sell_fee)
+                if sell_value is None:
+                    sell_value = 0.0
+                sim_cash += sell_value
+                await self.ctx.db.update_moonbag_state(
+                    token_address=token_address,
+                    moonbag_tokens=moonbag_tokens,
+                    moonbag_sold_at=now,
+                    moonbag_sold_value=sell_value,
+                )
+                stardust_tokens = moonbag_tokens * stardust_pct
+                existing = await self.ctx.db.get_token(token_address)
+                existing_tokens = existing["stardust_tokens"] if existing else None
+                total_stardust = stardust_tokens
+                if existing_tokens:
+                    total_stardust += existing_tokens
+                await self.ctx.db.update_stardust_state(
+                    token_address=token_address,
+                    stardust_tokens=total_stardust,
+                    stardust_sold_at=None,
+                    stardust_sold_value=None,
+                )
+
+            if recouped_just_now and row["sim_taken"]:
+                if not muted and self.ctx.config.allowed_chat_ids:
+                    sell_text = format_sell_message(
+                        pair,
+                        token_address,
+                        metrics,
+                        effective_price,
+                        self.ctx.config.display_timezone,
+                        recouped_at,
+                        sim_cash,
+                    )
+                    if self.ctx.config.dry_run:
+                        print(sell_text)
+                    else:
+                        await self._post_alert(sell_text, pair, token_address)
+            if stoploss_just_now and row["sim_taken"]:
+                if not muted and self.ctx.config.allowed_chat_ids:
+                    stop_text = format_stoploss_message(
+                        pair,
+                        token_address,
+                        metrics,
+                        stoploss_price_usd,
+                        self.ctx.config.display_timezone,
+                        stoploss_at,
+                        sim_cash,
+                    )
+                    if self.ctx.config.dry_run:
+                        print(stop_text)
+                    else:
+                        await self._post_alert(stop_text, pair, token_address)
+
             await self.ctx.db.update_performance_snapshot(
                 token_address=token_address,
                 last_seen_metrics=last_seen_metrics,
@@ -1139,6 +1460,11 @@ class Scanner:
                 above_target_started_at=above_target_started_at,
                 above_target_last_at=above_target_last_at,
                 above_target_total_sec=above_target_total_sec,
+                exec_price_usd=exec_price_usd,
+                exec_price_at=exec_price_at,
+                exec_slippage_pct=exec_slippage_pct,
+                exec_bleed_usd=exec_bleed_usd,
+                exec_value_usd=exec_value_usd,
             )
         await self.ctx.db.set_state("sim_cash", str(sim_cash))
 

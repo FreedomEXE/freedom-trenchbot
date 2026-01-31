@@ -55,6 +55,18 @@ class Config:
     sim_stop_multiple: float
     sim_equity_trail_multiple: float
     sim_equity_lock_pct: float
+    sim_moonbag_hold_sec: int
+    sim_stardust_pct: float
+    exec_price_enabled: bool
+    exec_price_max_positions: int
+    exec_price_max_concurrency: int
+    exec_price_quote_url: str
+    exec_price_token_list_url: str
+    exec_price_output_mint: str
+    exec_price_output_decimals: int
+    exec_price_slippage_bps: int
+    exec_price_cache_sec: int
+    exec_price_token_list_ttl_sec: int
     sim_buy_fee_pct: float
     sim_sell_fee_pct: float
     sim_slippage_sample_sec: int
@@ -136,6 +148,35 @@ def load_config() -> Config:
         sim_equity_lock_pct = 0.0
     if sim_equity_lock_pct > 1:
         sim_equity_lock_pct = 1.0
+    sim_moonbag_hold_sec = int(os.getenv("SIM_MOONBAG_HOLD_SEC", "14400"))
+    if sim_moonbag_hold_sec < 0:
+        sim_moonbag_hold_sec = 0
+    sim_stardust_pct = float(os.getenv("SIM_STARDUST_PCT", "0.10"))
+    if sim_stardust_pct < 0:
+        sim_stardust_pct = 0.0
+    if sim_stardust_pct > 1:
+        sim_stardust_pct = 1.0
+    exec_price_enabled = parse_bool(os.getenv("EXECUTABLE_PRICE_ENABLED", "false"), False)
+    exec_price_max_positions = int(os.getenv("EXECUTABLE_PRICE_MAX_POSITIONS", "40"))
+    exec_price_max_concurrency = int(os.getenv("EXECUTABLE_PRICE_MAX_CONCURRENCY", "3"))
+    exec_price_quote_url = os.getenv(
+        "EXECUTABLE_PRICE_QUOTE_URL",
+        "https://quote-api.jup.ag/v6/quote",
+    ).strip()
+    exec_price_token_list_url = os.getenv(
+        "EXECUTABLE_PRICE_TOKEN_LIST_URL",
+        "https://token.jup.ag/all",
+    ).strip()
+    exec_price_output_mint = os.getenv(
+        "EXECUTABLE_PRICE_OUTPUT_MINT",
+        "Es9vMFrzaCERy1v2FyZ4o8iUN6FQv7kQ3eGqT1r7xLU",
+    ).strip()
+    exec_price_output_decimals = int(os.getenv("EXECUTABLE_PRICE_OUTPUT_DECIMALS", "6"))
+    exec_price_slippage_bps = int(os.getenv("EXECUTABLE_PRICE_SLIPPAGE_BPS", "50"))
+    exec_price_cache_sec = int(os.getenv("EXECUTABLE_PRICE_CACHE_SEC", "5"))
+    exec_price_token_list_ttl_sec = int(
+        os.getenv("EXECUTABLE_PRICE_TOKEN_LIST_TTL_SEC", "86400")
+    )
     sim_buy_fee_pct = float(os.getenv("SIM_BUY_FEE_PCT", "1.0"))
     sim_sell_fee_pct = float(os.getenv("SIM_SELL_FEE_PCT", "1.0"))
     sim_slippage_sample_sec = int(os.getenv("SIM_SLIPPAGE_SAMPLE_SEC", "30"))
@@ -203,6 +244,18 @@ def load_config() -> Config:
         sim_stop_multiple=sim_stop_multiple,
         sim_equity_trail_multiple=sim_equity_trail_multiple,
         sim_equity_lock_pct=sim_equity_lock_pct,
+        sim_moonbag_hold_sec=sim_moonbag_hold_sec,
+        sim_stardust_pct=sim_stardust_pct,
+        exec_price_enabled=exec_price_enabled,
+        exec_price_max_positions=exec_price_max_positions,
+        exec_price_max_concurrency=exec_price_max_concurrency,
+        exec_price_quote_url=exec_price_quote_url,
+        exec_price_token_list_url=exec_price_token_list_url,
+        exec_price_output_mint=exec_price_output_mint,
+        exec_price_output_decimals=exec_price_output_decimals,
+        exec_price_slippage_bps=exec_price_slippage_bps,
+        exec_price_cache_sec=exec_price_cache_sec,
+        exec_price_token_list_ttl_sec=exec_price_token_list_ttl_sec,
         sim_buy_fee_pct=sim_buy_fee_pct,
         sim_sell_fee_pct=sim_sell_fee_pct,
         sim_slippage_sample_sec=sim_slippage_sample_sec,
